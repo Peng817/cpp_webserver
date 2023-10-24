@@ -91,7 +91,7 @@ void threadPool<T>::run(){
         // -- 线程池临界区 -- 
         //任务队列出队一个任务
         T* request = m_workQueue.front();
-        m_workQueue.push_front();
+        m_workQueue.pop_front();
         m_queueLocker.unlock();
         /* 这一步和上面疑惑的一样，感觉有些多余 */
         if(!request){
