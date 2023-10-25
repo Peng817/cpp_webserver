@@ -5,13 +5,14 @@
 #include <string.h>
 #include <sys/types.h>
 #include <cassert>
+#include <errno.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <signal.h>
 #include <arpa/inet.h>
 #include "thread_pool/locker.h"
-#include "thread_pool/threadPool.h"
+#include "thread_pool/threadPool.hpp"
 #include "http_connect/http_conn.h"
 
 const int MAX_FD = 65535; //最大文件描述符个数
@@ -58,7 +59,7 @@ int main(int argc,char* argv[]){
     //创建TCP套接字
     int listenfd = socket(PF_INET,SOCK_STREAM,0);
     assert(listenfd != -1);
-    /* TODO:不懂为什么这里要端口复用 */
+    /* TODO:端口复用，不懂为什么这里要端口复用 */
     //设置端口复用
     int reuse = 1;
     setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
@@ -84,12 +85,20 @@ int main(int argc,char* argv[]){
     /*
     其次，对于每个连接到服务器的客户端连接，我们也应该将其放入到监听队列中
     */
-   //TODO:此处，代码唐突将epollfd送入到客户端连接http_conn对象中绑定，之前没见过，为什么这么做
+   /*
+   此处，代码需要将epollfd送入到客户端连接http_conn对象中绑定，因为对于
+   http_conn即一个服务器接收到的客户端连接实体，其连接的sockfd和addr属于该对
+   象的私有成员变量，为了不破坏类的封装性，只能由每个连接对象本身来执行将连接送
+   入到epoll监听队列中的操作。同时，由于每个连接对象理应由同一个epoll管理，所以
+   其epoll值对于所有的对象来说应该是可以共享的，那么就可以将类内设置一个静态变量
+   用于承接传入的epollfd值，而使得每个连接对象都可以在送入监听队列时，进入同一个
+   epoll监听队列。
+   */
    http_conn::m_epollfd = epollfd;
    //到头来，还是使用死循环来保持主线程轮询进行
    while(true){
         //-1代表永久阻塞
-        int numOfReadyEvents = epoll_wait(epollfd,&epollEvents,MAX_EVENT_NUMBER,-1);
+        int numOfReadyEvents = epoll_wait(epollfd,epollEvents,MAX_EVENT_NUMBER,-1);
         //对于不是由于中断导致的epoll_wait返回值小于0的情况，说明epoll失败，直接退出循环
         if((numOfReadyEvents < 0 && (errno != EINTR))){
             std::cout << "--epoll failure\n";
@@ -109,11 +118,42 @@ int main(int argc,char* argv[]){
                     close(cfd);
                     continue;
                 }
-                //将新的客户数据，借由连接对象的初始化方法载入到数组中某一个对象中，此处直接使用客户端文件描述符作为数组索引
-                users[cfd].init(cfd,&clientAddress);
+                /*
+                将新的客户连接数据，借由连接对象的初始化方法载入到数组中某一个对象中，
+                此处直接使用客户端文件描述符作为数组索引，理论上浪费了前三个位置。
+                初始化方法会将指定对象的成员变量m_sockfd和地址m_addr赋值为传入的cfd
+                和地址，同时，还会顺便将其放入到epoll监听队列中。
+                */
+                users[cfd].init(cfd,clientAddress);
+            }else if(epollEvents[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
+                //如果监听到的连接事件是异常事件，则关闭连接。
+                /*
+                TODO:比较不理解的在于为什么只监听了EPOLLRDHUP和EPOLLIN事件，却需要检核错误时
+                检测多出来的EPOLLUP和EPOLLERR事件，难道这两个不用主动声明也会被监听到吗
+                */
+                users[sockfd].close_conn();
+            }else if(epollEvents[i].events & EPOLLIN){
+                if(users[sockfd].read()){
+                    //一次性把所有数据读完
+                    pool->append(&users[sockfd]);
+                }else{
+                    //读数据失败
+                    users[sockfd].close_conn();
+                }
+
+            }else if(epollEvents[i].events & EPOLLOUT){
+                if(!users[sockfd].write()){
+                    //一次性写完数据，如果没写成功，跳到该if逻辑内
+                    users[sockfd].close_conn();
+                }
             }
         }
-   }
+    }
 
+    //epoll监听失败时，会跳出死循环，在监听失败后，为其收尾
+    close(epollfd);
+    close(listenfd);
+    delete[] users;
+    delete pool;
     return 0;
 }
