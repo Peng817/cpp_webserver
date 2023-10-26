@@ -46,7 +46,6 @@ private:
     
     //是否结束线程
     bool m_stop;
-
 };
 
 template <typename T>

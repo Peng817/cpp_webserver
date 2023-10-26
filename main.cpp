@@ -128,7 +128,7 @@ int main(int argc,char* argv[]){
             }else if(epollEvents[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
                 //如果监听到的连接事件是异常事件，则关闭连接。
                 /*
-                TODO:比较不理解的在于为什么只监听了EPOLLRDHUP和EPOLLIN事件，却需要检核错误时
+                TODO：比较不理解的在于为什么只监听了EPOLLRDHUP和EPOLLIN事件，却需要检核错误时
                 检测多出来的EPOLLUP和EPOLLERR事件，难道这两个不用主动声明也会被监听到吗
                 */
                 users[sockfd].close_conn();
@@ -137,7 +137,10 @@ int main(int argc,char* argv[]){
                     //一次性把所有数据读完
                     pool->append(&users[sockfd]);
                 }else{
-                    //读数据失败
+                    /*
+                    读数据失败，失败原因可能是读失败，或者对面关闭连接，或者内容超过连接
+                    对象准备好的一整块缓存（1024Bytes）
+                    */
                     users[sockfd].close_conn();
                 }
 
