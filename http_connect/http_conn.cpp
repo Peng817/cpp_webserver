@@ -701,9 +701,15 @@ bool http_conn::add_blank_line()
 
 void http_conn::unmap()
 {
+
     if (m_file_address)
     {
         munmap(m_file_address, m_file_stat.st_size);
         m_file_address = 0;
     }
+}
+
+int http_conn::test()
+{
+    return 5;
 }

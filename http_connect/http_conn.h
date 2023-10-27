@@ -139,6 +139,8 @@ private:
     // 关闭内存映射
     void http_conn::unmap();
 
+    int test();
+
 private:
     // 当前客户端连接的socket
     int m_sockfd;
