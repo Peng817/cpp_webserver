@@ -105,7 +105,10 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
     m_sockfd = sockfd;
     // TODO:直接对结构体使用赋值构造函数?
     m_address = addr;
-    // TODO:端口复用,书上说这两行端口复用是为了避免TIME_WAIT状态，仅用于调式，实际使用要去掉
+    /*
+    一般来说，端口复用是为了让主动关闭的那一端在重启之后也能强制忽略上一次进程中已建立连接的还没完全断开的状态
+    而强制重新利用之前未完全断开的工作连接，进而马上就能重新建立起连接，便于调试。
+    */
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     addfd(m_epollfd, m_sockfd, true);
@@ -128,7 +131,7 @@ void http_conn::close_conn()
 
 bool http_conn::read()
 {
-    // TODO:当前读索引超过读缓存，说明读索引越界了？
+    // 如果当前读索引超过读缓存，说明读缓存已经装不下整个数据报，此时将会关闭连接
     if (m_read_idx >= READ_BUFFER_SIZE)
     {
         return false;
@@ -231,6 +234,7 @@ bool http_conn::write()
             }
             else
             {
+                // 本次设置无意义，因为返回了false，其实很快之后本对象指向的连接将关闭。
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
                 return false;
             }
@@ -267,7 +271,7 @@ http_conn::HTTP_CODE http_conn::parseRequest()
     while (m_check_state != CHECK_STATE_EXIT && lineStatus == LINE_OK)
     {
         lineStatus = parseLine();
-        // 如果从状态机发生状态改变，则当前主状态机依赖的状态，
+        // 如果从状态机发生状态改变，则当前主状态机依赖的状态不再，此时主状态机不再工作
         // 确保主状态机的运行是在指定从状态机状态下进行
         if (lineStatus != LINE_OK)
             continue;
@@ -549,7 +553,7 @@ http_conn::LINE_STATUS http_conn::parseLine()
         {
             if ((m_checked_idx + 1) == m_read_idx)
             {
-                // 说明不完整，要求重启线程为该连接读入数据
+                // 说明不完整，将要求主线程继续为该连接对象读入数据
                 return LINE_OPEN;
             }
             else if (m_read_buf[m_checked_idx + 1] == '\n')
@@ -566,11 +570,11 @@ http_conn::LINE_STATUS http_conn::parseLine()
         else if (temp == '\n')
         {
             /*
-            当前情况仅有一种可能，即上一种if情况中的第一种子情况出现后新读入数据
+            当前情况仅有一种可能出现检测正确，即上一种if情况中的第一种子情况出现后新读入数据
             此时第一个检测字符就会是'\n'
             */
             /*
-             TODO：推理上，由于上一个if使得函数以OPEN形态结束时，checked_idx
+             TODO：逻辑上，由于上一个if使得函数以OPEN形态结束时，checked_idx
              并未增加到后一位，而是保留在'\r'处，所以重启线程执行时，指针不存在
              会指到'\n'的情况。
             */
