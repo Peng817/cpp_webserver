@@ -1,4 +1,3 @@
-#include <exception>
 #include "locker.h"
 
 locker::locker(){
