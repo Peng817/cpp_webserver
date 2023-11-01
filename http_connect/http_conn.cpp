@@ -59,7 +59,7 @@ void modfd(int epollfd, int fd, int ev)
 {
     epoll_event event;
     event.data.fd = fd;
-    event.events = ev | EPOLLONESHOT;
+    event.events = ev | EPOLLONESHOT | EPOLLET | EPOLLRDHUP;
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
@@ -86,9 +86,9 @@ void http_conn::process()
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
-    std::cout << "--已经解析请求，即将发出响应报文\n";
-    // 生成响应
-    // 传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
+    // std::cout << "--已经解析请求，即将发出响应报文\n";
+    //  生成响应
+    //  传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
     bool writeReturn = processResponse(parseReturn);
     if (!writeReturn)
     {
@@ -149,7 +149,7 @@ bool http_conn::read()
         可以让下一次数据接着已有的数据后面存放在内存缓存内。同时，我们告知recv的缓
         冲区长度就是内存缓存的剩余长度，这样我们也可以利用recv的机制做到安全读取。
         */
-        bytesRead = recv(m_sockfd, &m_read_buf[m_read_idx],
+        bytesRead = recv(m_sockfd, m_read_buf + m_read_idx,
                          READ_BUFFER_SIZE - m_read_idx, 0);
         if (bytesRead == -1)
         {
@@ -183,11 +183,10 @@ bool http_conn::read()
 
 bool http_conn::write()
 {
+    // 修改参考：https://blog.csdn.net/ad838931963/article/details/118598882
     int temp = 0;
-    int bytes_have_send = 0;         // 已经发送的字节
-    int bytes_to_send = m_write_idx; // 将要发送的字节 （m_write_idx）写缓冲区中待发送的字节数
-
-    if (bytes_to_send == 0)
+    // TODO:感觉多余
+    if (m_bytes_to_send == 0)
     {
         // 将要发送的字节为0，这一次响应结束。
         modfd(m_epollfd, m_sockfd, EPOLLIN);
@@ -219,23 +218,40 @@ bool http_conn::write()
             return false;
         }
         // 可以正常将对象的就绪写缓存 写到sockfd的TCP写缓存中，那就一直不断写
-        bytes_to_send -= temp;
-        bytes_have_send += temp;
-        if (bytes_to_send <= bytes_have_send)
+        m_bytes_to_send -= temp;
+        m_bytes_have_send += temp;
+        // 如果已发送的字节大于报头，证明报头发送完毕，且m_iv_count > 1
+        if (m_bytes_have_send >= m_iv[0].iov_len)
+        {
+            // 将分散写的第一块写来源待写数据长度置0，不再需要对第一块的内容做输出
+            m_iv[0].iov_len = 0;
+            // 不断更新第二块写来源写的进度
+            m_iv[1].iov_base = m_file_address + (m_bytes_have_send - m_write_idx);
+            m_iv[1].iov_len = m_bytes_to_send;
+        }
+        else
+        {
+            // 否则，已发送的字节不如报头，说明一次发送没有将报头发送完
+            m_iv[0].iov_base = m_write_buf + m_bytes_have_send;
+            m_iv[0].iov_len -= temp;
+        }
+
+        // 如果将发送的数据长度小于等于0，代表已经没有数据可发，代表发送完毕
+        if (m_bytes_to_send <= 0)
         {
             // 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否立即关闭连接
             unmap();
+            std::cout << "--已经发出" << m_bytes_have_send << " bytes 数据。\n";
+            modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)
             {
                 // 对除了对象本身的sockfd和地址以外，连接对象其余的成员数据清空
                 init();
-                modfd(m_epollfd, m_sockfd, EPOLLIN);
                 return true;
             }
             else
             {
-                // 本次设置无意义，因为返回了false，其实很快之后本对象指向的连接将关闭。
-                modfd(m_epollfd, m_sockfd, EPOLLIN);
+                // 返回了false，之后本对象指向的连接将关闭。
                 return false;
             }
         }
@@ -247,8 +263,11 @@ void http_conn::init()
     m_check_state = CHECK_STATE_REQUESTLINE;
     m_read_idx = 0;
     m_read_idx = 0;
+    m_write_idx = 0;
     m_checked_idx = 0;
     m_start_line = 0;
+    m_bytes_to_send = 0;
+    m_bytes_have_send = 0;
     m_method = GET;
     m_url = NULL;
     m_version = NULL;
@@ -405,14 +424,16 @@ bool http_conn::processResponse(HTTP_CODE ret)
         m_iv[0].iov_len = m_write_idx;
         m_iv[1].iov_base = m_file_address;
         m_iv[1].iov_len = m_file_stat.st_size;
+        m_bytes_to_send = m_write_idx + m_file_stat.st_size;
         m_iv_count = 2;
         return true;
     default:
         return false;
     }
-    // 感觉这一块不会执行
+    // 当发送的是错误提示的响应报文时，只需要有响应报文头
     m_iv[0].iov_base = m_write_buf;
     m_iv[0].iov_len = m_write_idx;
+    m_bytes_to_send = m_write_idx;
     m_iv_count = 1;
     return true;
 }
@@ -647,6 +668,7 @@ bool http_conn::add_headers(int content_len)
     add_content_type();
     add_linger();
     add_blank_line();
+    return true;
 }
 
 bool http_conn::add_content(const char *content)
@@ -672,6 +694,7 @@ bool http_conn::add_response(const char *format, ...)
         参数3：格式
         参数4：参数列表
     */
+
     int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);
     if (len >= (WRITE_BUFFER_SIZE - 1 - m_write_idx))
     {

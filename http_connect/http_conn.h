@@ -2,6 +2,7 @@
 #define HTTPCONN_H
 #include <iostream>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -139,7 +140,7 @@ private:
     bool add_blank_line();
 
     // 关闭内存映射
-    void http_conn::unmap();
+    void unmap();
 
     int test();
 
@@ -188,6 +189,10 @@ private:
     // 我们将采用writev来执行写操作，所以定义下面两个成员，其中m_iv_count表示被写内存块的数量。
     struct iovec m_iv[2];
     int m_iv_count;
+    // 由于大的文件体可能不会一次写完，因此，需要记录分散写的总体数据量
+    int m_bytes_have_send;
+    // 记录分散写已经写的数据量
+    int m_bytes_to_send;
 
 public:
     /* 静态成员变量必须在类外定义，因此放在了类的实现文件中定义 */
