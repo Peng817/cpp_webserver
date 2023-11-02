@@ -299,7 +299,6 @@ http_conn::HTTP_CODE http_conn::parseRequest()
         text = getLine();
         // 解析正确时，解析指针在另一个角度可看成是下一行首地址
         m_start_line = m_checked_idx;
-        printf("--got 1 http line: %s\n", text);
         switch (m_check_state)
         {
         case CHECK_STATE_REQUESTLINE:
@@ -547,7 +546,7 @@ http_conn::HTTP_CODE http_conn::parseHeaders(char *text)
     }
     else
     {
-        printf("oop! unknow header: %s\n", text);
+        // printf("oop! unknow header: %s\n", text);
     }
     // 意义不大，正常解析完成执行到这随便返回的一个无关紧要的值
     return NO_REQUEST;
