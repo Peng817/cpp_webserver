@@ -116,15 +116,24 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
     init();
 }
 
+void http_conn::init(int sockfd, const sockaddr_in &addr, util_timer *timer)
+{
+    init(sockfd, addr);
+    m_timer = timer;
+}
+
 void http_conn::close_conn()
 {
     // 关闭连接应该做的事：将连接从epoll中移除，将连接描述符关闭,将成员变量悬置，将用户计数-1
+    // 如果m_timer有绑定定时器，则断开绑定
     if (m_sockfd != -1)
     {
 
         removefd(m_epollfd, m_sockfd);
         close(m_sockfd);
         m_sockfd = -1;
+        // 绑定的定时器会自行销毁，我们只需要提前断开绑定即可
+        m_timer = NULL;
         m_user_count--;
     }
 }
@@ -258,6 +267,11 @@ bool http_conn::write()
     }
 }
 
+int http_conn::getSockfd()
+{
+    return m_sockfd;
+}
+
 void http_conn::init()
 {
     m_check_state = CHECK_STATE_REQUESTLINE;
@@ -273,6 +287,7 @@ void http_conn::init()
     m_version = NULL;
     m_host = NULL;
     m_linger = false;
+    m_timer = NULL;
     bzero(m_real_file, FILENAME_LEN);
     bzero(m_read_buf, READ_BUFFER_SIZE);
     bzero(m_write_buf, WRITE_BUFFER_SIZE);
@@ -733,9 +748,4 @@ void http_conn::unmap()
         munmap(m_file_address, m_file_stat.st_size);
         m_file_address = 0;
     }
-}
-
-int http_conn::test()
-{
-    return 5;
 }

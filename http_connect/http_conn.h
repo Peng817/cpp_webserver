@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <stdarg.h>
+#include "../timer/listTimer.h"
 
 class http_conn
 {
@@ -97,12 +98,17 @@ public:
     void process();
     // 通过传入socket描述符和客户端地址初始化连接
     void init(int sockfd, const struct sockaddr_in &addr);
+    // 通过传入socket描述符和客户端地址以及定时器来初始化连接
+    void init(int sockfd, const struct sockaddr_in &addr, util_timer *timer);
     // 关闭连接
     void close_conn();
     // 非阻塞读，由主线程以proactor模式调用
     bool read();
     // 非阻塞写，由主线程以proactor模式调用
     bool write();
+
+    // 获取socketfd
+    int getSockfd();
 
 private:
     // 初始化没有公开接口进行传值的成员变量
@@ -141,8 +147,6 @@ private:
 
     // 关闭内存映射
     void unmap();
-
-    int test();
 
 private:
     // 当前客户端连接的socket
@@ -200,6 +204,10 @@ public:
     static int m_epollfd;
     // 用户连接数量
     static int m_user_count;
+
+public:
+    // 用于和定时器绑定的指针，该定时器会在到时后自动销毁，因此连接类不需要管
+    util_timer *m_timer;
 };
 
 #endif
