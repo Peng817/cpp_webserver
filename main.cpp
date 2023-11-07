@@ -64,7 +64,14 @@ int main(int argc, char *argv[])
     // 创建TCP套接字
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd != -1);
-    /* TODO:端口复用，不懂为什么这里要端口复用 */
+    /*
+    将服务器的端口设置为复用是因为，当服务器异常终止结束时，则由于在TCP连接中，服务器是
+    主动发起关闭连接的一方，因此需要在连接中接收到客户端返回的LAST_ASK后，还要继续等待
+    2MSL时间，而这将是使得我们不能在服务器程序主动关闭后立即重新启动的原因，因为此时上一次连接
+    还未立马断开。为了强制进程立即使用出于TIME_WAIT状态连接占用的端口，我们将监听的socket选项
+    设置为端口重用，此时即使监听sock在主动关闭进程后还处在TIME_WAIT状态，与之绑定的socket地址
+    也可以立即重用。
+    */
     // 设置端口复用
     int reuse = 1;
     setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -140,8 +147,9 @@ int main(int argc, char *argv[])
             {
                 // 如果监听到的连接事件是异常事件，则关闭连接。
                 /*
-                TODO：比较不理解的在于为什么只监听了EPOLLRDHUP和EPOLLIN事件，却需要检核错误时
-                检测多出来的EPOLLUP和EPOLLERR事件，难道这两个不用主动声明也会被监听到吗
+                TODO：比较不理解的在于为什么在前面只监听了EPOLLRDHUP和EPOLLIN事件，在这却
+                需要检核错误时检测多出来的EPOLLUP和EPOLLERR事件，难道这两个不用主动声明也会
+                被监听到吗
                 */
                 users[sockfd].close_conn();
             }

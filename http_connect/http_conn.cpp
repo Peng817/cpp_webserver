@@ -59,7 +59,7 @@ void modfd(int epollfd, int fd, int ev)
 {
     epoll_event event;
     event.data.fd = fd;
-    event.events = ev | EPOLLONESHOT;
+    event.events = ev | EPOLLONESHOT | EPOLLET | EPOLLRDHUP;
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
@@ -86,9 +86,9 @@ void http_conn::process()
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
-    std::cout << "--已经解析请求，即将发出响应报文\n";
-    // 生成响应
-    // 传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
+    // std::cout << "--已经解析请求，即将发出响应报文\n";
+    //  生成响应
+    //  传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
     bool writeReturn = processResponse(parseReturn);
     if (!writeReturn)
     {
@@ -105,7 +105,10 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
     m_sockfd = sockfd;
     // TODO:直接对结构体使用赋值构造函数?
     m_address = addr;
-    // TODO:端口复用,书上说这两行端口复用是为了避免TIME_WAIT状态，仅用于调式，实际使用要去掉
+    /*
+    一般来说，端口复用是为了让主动关闭的那一端在重启之后也能强制忽略上一次进程中已建立连接的还没完全断开的状态
+    而强制重新利用之前未完全断开的工作连接，进而马上就能重新建立起连接，便于调试。
+    */
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     addfd(m_epollfd, m_sockfd, true);
@@ -128,7 +131,7 @@ void http_conn::close_conn()
 
 bool http_conn::read()
 {
-    // TODO:当前读索引超过读缓存，说明读索引越界了？
+    // 如果当前读索引超过读缓存，说明读缓存已经装不下整个数据报，此时将会关闭连接
     if (m_read_idx >= READ_BUFFER_SIZE)
     {
         return false;
@@ -146,7 +149,7 @@ bool http_conn::read()
         可以让下一次数据接着已有的数据后面存放在内存缓存内。同时，我们告知recv的缓
         冲区长度就是内存缓存的剩余长度，这样我们也可以利用recv的机制做到安全读取。
         */
-        bytesRead = recv(m_sockfd, &m_read_buf[m_read_idx],
+        bytesRead = recv(m_sockfd, m_read_buf + m_read_idx,
                          READ_BUFFER_SIZE - m_read_idx, 0);
         if (bytesRead == -1)
         {
@@ -180,11 +183,10 @@ bool http_conn::read()
 
 bool http_conn::write()
 {
+    // 修改参考：https://blog.csdn.net/ad838931963/article/details/118598882
     int temp = 0;
-    int bytes_have_send = 0;         // 已经发送的字节
-    int bytes_to_send = m_write_idx; // 将要发送的字节 （m_write_idx）写缓冲区中待发送的字节数
-
-    if (bytes_to_send == 0)
+    // TODO:感觉多余
+    if (m_bytes_to_send == 0)
     {
         // 将要发送的字节为0，这一次响应结束。
         modfd(m_epollfd, m_sockfd, EPOLLIN);
@@ -216,22 +218,40 @@ bool http_conn::write()
             return false;
         }
         // 可以正常将对象的就绪写缓存 写到sockfd的TCP写缓存中，那就一直不断写
-        bytes_to_send -= temp;
-        bytes_have_send += temp;
-        if (bytes_to_send <= bytes_have_send)
+        m_bytes_to_send -= temp;
+        m_bytes_have_send += temp;
+        // 如果已发送的字节大于报头，证明报头发送完毕，且m_iv_count > 1
+        if (m_bytes_have_send >= m_iv[0].iov_len)
+        {
+            // 将分散写的第一块写来源待写数据长度置0，不再需要对第一块的内容做输出
+            m_iv[0].iov_len = 0;
+            // 不断更新第二块写来源写的进度
+            m_iv[1].iov_base = m_file_address + (m_bytes_have_send - m_write_idx);
+            m_iv[1].iov_len = m_bytes_to_send;
+        }
+        else
+        {
+            // 否则，已发送的字节不如报头，说明一次发送没有将报头发送完
+            m_iv[0].iov_base = m_write_buf + m_bytes_have_send;
+            m_iv[0].iov_len -= temp;
+        }
+
+        // 如果将发送的数据长度小于等于0，代表已经没有数据可发，代表发送完毕
+        if (m_bytes_to_send <= 0)
         {
             // 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否立即关闭连接
             unmap();
+            std::cout << "--已经发出" << m_bytes_have_send << " bytes 数据。\n";
+            modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)
             {
                 // 对除了对象本身的sockfd和地址以外，连接对象其余的成员数据清空
                 init();
-                modfd(m_epollfd, m_sockfd, EPOLLIN);
                 return true;
             }
             else
             {
-                modfd(m_epollfd, m_sockfd, EPOLLIN);
+                // 返回了false，之后本对象指向的连接将关闭。
                 return false;
             }
         }
@@ -243,8 +263,11 @@ void http_conn::init()
     m_check_state = CHECK_STATE_REQUESTLINE;
     m_read_idx = 0;
     m_read_idx = 0;
+    m_write_idx = 0;
     m_checked_idx = 0;
     m_start_line = 0;
+    m_bytes_to_send = 0;
+    m_bytes_have_send = 0;
     m_method = GET;
     m_url = NULL;
     m_version = NULL;
@@ -267,7 +290,7 @@ http_conn::HTTP_CODE http_conn::parseRequest()
     while (m_check_state != CHECK_STATE_EXIT && lineStatus == LINE_OK)
     {
         lineStatus = parseLine();
-        // 如果从状态机发生状态改变，则当前主状态机依赖的状态，
+        // 如果从状态机发生状态改变，则当前主状态机依赖的状态不再，此时主状态机不再工作
         // 确保主状态机的运行是在指定从状态机状态下进行
         if (lineStatus != LINE_OK)
             continue;
@@ -276,7 +299,6 @@ http_conn::HTTP_CODE http_conn::parseRequest()
         text = getLine();
         // 解析正确时，解析指针在另一个角度可看成是下一行首地址
         m_start_line = m_checked_idx;
-        printf("--got 1 http line: %s\n", text);
         switch (m_check_state)
         {
         case CHECK_STATE_REQUESTLINE:
@@ -401,14 +423,16 @@ bool http_conn::processResponse(HTTP_CODE ret)
         m_iv[0].iov_len = m_write_idx;
         m_iv[1].iov_base = m_file_address;
         m_iv[1].iov_len = m_file_stat.st_size;
+        m_bytes_to_send = m_write_idx + m_file_stat.st_size;
         m_iv_count = 2;
         return true;
     default:
         return false;
     }
-    // 感觉这一块不会执行
+    // 当发送的是错误提示的响应报文时，只需要有响应报文头
     m_iv[0].iov_base = m_write_buf;
     m_iv[0].iov_len = m_write_idx;
+    m_bytes_to_send = m_write_idx;
     m_iv_count = 1;
     return true;
 }
@@ -522,7 +546,7 @@ http_conn::HTTP_CODE http_conn::parseHeaders(char *text)
     }
     else
     {
-        printf("oop! unknow header: %s\n", text);
+        // printf("oop! unknow header: %s\n", text);
     }
     // 意义不大，正常解析完成执行到这随便返回的一个无关紧要的值
     return NO_REQUEST;
@@ -549,7 +573,7 @@ http_conn::LINE_STATUS http_conn::parseLine()
         {
             if ((m_checked_idx + 1) == m_read_idx)
             {
-                // 说明不完整，要求重启线程为该连接读入数据
+                // 说明不完整，将要求主线程继续为该连接对象读入数据
                 return LINE_OPEN;
             }
             else if (m_read_buf[m_checked_idx + 1] == '\n')
@@ -566,11 +590,11 @@ http_conn::LINE_STATUS http_conn::parseLine()
         else if (temp == '\n')
         {
             /*
-            当前情况仅有一种可能，即上一种if情况中的第一种子情况出现后新读入数据
+            当前情况仅有一种可能出现检测正确，即上一种if情况中的第一种子情况出现后新读入数据
             此时第一个检测字符就会是'\n'
             */
             /*
-             TODO：推理上，由于上一个if使得函数以OPEN形态结束时，checked_idx
+             TODO：逻辑上，由于上一个if使得函数以OPEN形态结束时，checked_idx
              并未增加到后一位，而是保留在'\r'处，所以重启线程执行时，指针不存在
              会指到'\n'的情况。
             */
@@ -643,6 +667,7 @@ bool http_conn::add_headers(int content_len)
     add_content_type();
     add_linger();
     add_blank_line();
+    return true;
 }
 
 bool http_conn::add_content(const char *content)
@@ -668,6 +693,7 @@ bool http_conn::add_response(const char *format, ...)
         参数3：格式
         参数4：参数列表
     */
+
     int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);
     if (len >= (WRITE_BUFFER_SIZE - 1 - m_write_idx))
     {

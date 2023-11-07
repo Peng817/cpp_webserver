@@ -2,6 +2,7 @@
 #define HTTPCONN_H
 #include <iostream>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -110,13 +111,14 @@ private:
     HTTP_CODE parseRequest();
     // 构建http应答
     bool processResponse(HTTP_CODE ret);
+
     // 解析HTTP请求行，获得请求方法，目标URL,HTTP版本
     HTTP_CODE parseRequestLine(char *text);
     // 解析首部字段，目前只解析了请求体长度，host,是否保持连接
     HTTP_CODE parseHeaders(char *text);
     // 解析报文主体
     HTTP_CODE parseContent(char *text);
-    // 解析一行
+    // 检测一行
     LINE_STATUS parseLine();
     // 获取一行
     char *getLine();
@@ -126,6 +128,7 @@ private:
         服务器上的位置，则我们要做的就是将资源放到响应报文的报文主体中
     */
     HTTP_CODE doRequest();
+
     bool add_status_line(int status, const char *title);
     // 向报文中添加报文头，这里只实现了实体长度，实体类型，是否持续
     bool add_headers(int content_length);
@@ -137,7 +140,7 @@ private:
     bool add_blank_line();
 
     // 关闭内存映射
-    void http_conn::unmap();
+    void unmap();
 
     int test();
 
@@ -186,6 +189,10 @@ private:
     // 我们将采用writev来执行写操作，所以定义下面两个成员，其中m_iv_count表示被写内存块的数量。
     struct iovec m_iv[2];
     int m_iv_count;
+    // 由于大的文件体可能不会一次写完，因此，需要记录分散写的总体数据量
+    int m_bytes_have_send;
+    // 记录分散写已经写的数据量
+    int m_bytes_to_send;
 
 public:
     /* 静态成员变量必须在类外定义，因此放在了类的实现文件中定义 */
