@@ -45,6 +45,7 @@ void sort_timer_lst::del_timer(util_timer *timer)
     {
         return;
     }
+    printf("--delete 1 tiemr.\n");
     if ((timer == head) && (timer == tail))
     {
         delete timer;
@@ -103,7 +104,6 @@ void sort_timer_lst::tick()
     {
         return;
     }
-    printf("timer tick\n");
     time_t cur = time(NULL);
     util_timer *tmp = head;
     while (tmp)
@@ -124,13 +124,17 @@ void sort_timer_lst::tick()
         这里并没有使用del_timer，而是多写了一段逻辑
         */
         tmp->cb_func(tmp->data);
-        head = tmp->next;
-        if (head)
-        {
-            head->prev = NULL;
-        }
-        delete tmp;
-        tmp = head;
+        util_timer *tmp2;
+        tmp2 = tmp->next;
+        del_timer(tmp);
+        tmp = tmp2;
+        // head = tmp->next;
+        // if (head)
+        // {
+        //     head->prev = NULL;
+        // }
+        // delete tmp;
+        // tmp = head;
     }
 }
 

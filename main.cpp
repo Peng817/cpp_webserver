@@ -21,7 +21,7 @@ const int TIME_SLOT = 5;             // alarm信号频率
 static int pipefd[2];
 /* 感觉是不是不用extern应该也行，但此处使用extern是为了强调该两个函数来自于另外文件 */
 
-extern void addfd(int epollfd, int fd, bool oneShot);
+extern void addfd(int epollfd, int fd, uint32_t ev);
 extern void removefd(int epollfd, int fd);
 extern void modfd(int epollfd, int fd, int ev);
 extern int setNoBlocking(int fd);
@@ -66,8 +66,8 @@ void addsig(int sig, void(handler)(int))
 // 定时器回调函数，它删除非活动连接socket上的注册事件，并关闭之，同时将连接对象和定时器解绑
 void cb_func(http_conn *user)
 {
+    printf("--timer call back it's client to close fd %d\n", user->getSockfd());
     user->close_conn();
-    printf("--timer close fd %d\n", user->getSockfd());
 }
 
 int main(int argc, char *argv[])
@@ -86,7 +86,7 @@ int main(int argc, char *argv[])
     // 创建线程池，并初始化线程池
     threadPool<http_conn> *pool = NULL;
     // 创建定时器有序链表
-    sort_timer_lst timerList;
+    sort_timer_lst *timerList = new sort_timer_lst();
     try
     {
         pool = new threadPool<http_conn>;
@@ -131,13 +131,13 @@ int main(int argc, char *argv[])
     int epollfd = epoll_create(1);
     assert(epollfd != -1);
     // 先将服务器监听socket放入epoll监听队列中
-    addfd(epollfd, listenfd, false);
+    addfd(epollfd, listenfd, EPOLLIN);
 
     // 再次，将信号传递的管道的出口放入到epoll监听队列中
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
     assert(ret != -1);
     setNoBlocking(pipefd[1]);
-    addfd(epollfd, pipefd[0], true);
+    addfd(epollfd, pipefd[0], EPOLLIN | EPOLLET);
 
     /* 注册信号 */
     addRestartSig(SIGALRM, sigHandler);
@@ -148,6 +148,7 @@ int main(int argc, char *argv[])
     bool timeout = false;
     // 先初发出一个计时信号
     alarm(TIME_SLOT);
+    // printf("--first alarm will to be send after %ds ... \n", TIME_SLOT);
     /*
     最后，对于每个连接到服务器的客户端连接，我们也应该将其放入到监听队列中
     */
@@ -175,7 +176,7 @@ int main(int argc, char *argv[])
         for (int i = 0; i < numOfReadyEvents; ++i)
         {
             int sockfd = epollEvents[i].data.fd;
-            util_timer *timer;
+            util_timer *timer = NULL;
             if (sockfd != listenfd && sockfd != pipefd[0])
             {
                 timer = users[sockfd].m_timer;
@@ -205,8 +206,9 @@ int main(int argc, char *argv[])
                 timer->cb_func = cb_func;
                 time_t cur = time(NULL);
                 timer->expire = cur + 3 * TIME_SLOT;
+                printf("--build 1 timer...\n");
                 users[cfd].init(cfd, clientAddress, timer);
-                timerList.add_timer(timer);
+                timerList->add_timer(timer);
             }
             else if ((sockfd == pipefd[0]) && (epollEvents[i].events & EPOLLIN))
             {
@@ -252,7 +254,7 @@ int main(int argc, char *argv[])
                 */
                 if (timer)
                 {
-                    timerList.del_timer(timer);
+                    timerList->del_timer(timer);
                 }
                 users[sockfd].close_conn();
             }
@@ -266,7 +268,7 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
-                        timerList.adjust_timer(timer);
+                        timerList->adjust_timer(timer);
                     }
                     pool->append(&users[sockfd]);
                 }
@@ -278,7 +280,7 @@ int main(int argc, char *argv[])
                     */
                     if (timer)
                     {
-                        timerList.del_timer(timer);
+                        timerList->del_timer(timer);
                     }
                     users[sockfd].close_conn();
                 }
@@ -290,7 +292,7 @@ int main(int argc, char *argv[])
                     // 一次性写完数据，如果没写成功，跳到该if逻辑内
                     if (timer)
                     {
-                        timerList.del_timer(timer);
+                        timerList->del_timer(timer);
                     }
                     users[sockfd].close_conn();
                 }
@@ -302,14 +304,18 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
-                        timerList.adjust_timer(timer);
+                        timerList->adjust_timer(timer);
                     }
                 }
             }
         } // for(epollEvent)
         if (timeout)
         {
-            timerList.tick();
+            time_t cur = time(NULL);
+            char timestr[32];
+            strftime(timestr, sizeof(timestr), "%Y-%m-%d %H:%M:%S", localtime(&cur));
+            timerList->tick();
+            printf("--%s: %d http-connet is linking!\n", timestr, http_conn::m_user_count);
             alarm(TIME_SLOT);
             timeout = false;
         }
@@ -322,6 +328,7 @@ int main(int argc, char *argv[])
     close(pipefd[1]);
     close(pipefd[0]);
     delete[] users;
+    delete timerList;
     delete pool;
     return 0;
 }

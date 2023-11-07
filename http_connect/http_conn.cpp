@@ -23,7 +23,7 @@ int setNoBlocking(int fd)
 }
 
 // 向epoll中添加需要监听的文件描述符
-void addfd(int epollfd, int fd, bool oneShot)
+void addfd(int epollfd, int fd, uint32_t target_events)
 {
     epoll_event event;
     event.data.fd = fd;
@@ -34,11 +34,10 @@ void addfd(int epollfd, int fd, bool oneShot)
     开连接.此处代码和书上不同之处在于没有引入ET工作模式，这是因为
     由于后面引入了oneShot工作模式，故有没有ET影响不大。
      */
-    event.events = EPOLLIN | EPOLLRDHUP;
-    if (oneShot)
-    {
-        event.events |= EPOLLONESHOT;
-    }
+    // 监听3个基本事件：文件描述符关闭，对端连接异常断开，发生错误
+    event.events = EPOLLHUP | EPOLLRDHUP | EPOLLERR;
+    // 额外监听指定事件
+    event.events |= target_events;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
     /*
     由于引入了oneshot模式，所以之后读数据必须保证一次性读完，而一次性
@@ -111,15 +110,15 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
     */
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    addfd(m_epollfd, m_sockfd, true);
+    addfd(m_epollfd, m_sockfd, EPOLLIN | EPOLLONESHOT | EPOLLET);
     m_user_count++;
     init();
 }
 
 void http_conn::init(int sockfd, const sockaddr_in &addr, util_timer *timer)
 {
-    init(sockfd, addr);
     m_timer = timer;
+    init(sockfd, addr);
 }
 
 void http_conn::close_conn()
@@ -132,9 +131,10 @@ void http_conn::close_conn()
         removefd(m_epollfd, m_sockfd);
         close(m_sockfd);
         m_sockfd = -1;
-        // 绑定的定时器会自行销毁，我们只需要提前断开绑定即可
+        // 绑定的定时器会被timerList销毁，我们只需要提前断开绑定即可
         m_timer = NULL;
         m_user_count--;
+        printf("--http_conn class close connect,and pointer to timer in http_conn set to NULL.\n");
     }
 }
 
@@ -185,8 +185,9 @@ bool http_conn::read()
             m_read_idx += bytesRead;
         }
     }
-    std::cout << "--一次性读到数据:\n"
-              << m_read_buf << std::endl;
+    std::cout << "--已经读到数据:\n";
+    // std::cout << "--一次性读到数据:\n"
+    //           << m_read_buf << std::endl;
     return true;
 }
 
@@ -254,6 +255,7 @@ bool http_conn::write()
             modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)
             {
+                std::cout << "--connect is keep-alive!\n";
                 // 对除了对象本身的sockfd和地址以外，连接对象其余的成员数据清空
                 init();
                 return true;
@@ -261,6 +263,7 @@ bool http_conn::write()
             else
             {
                 // 返回了false，之后本对象指向的连接将关闭。
+                std::cout << "--connect is not keep-alive!\n";
                 return false;
             }
         }
@@ -287,7 +290,6 @@ void http_conn::init()
     m_version = NULL;
     m_host = NULL;
     m_linger = false;
-    m_timer = NULL;
     bzero(m_real_file, FILENAME_LEN);
     bzero(m_read_buf, READ_BUFFER_SIZE);
     bzero(m_write_buf, WRITE_BUFFER_SIZE);

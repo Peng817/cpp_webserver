@@ -3,6 +3,8 @@
 
 #include <time.h>
 #include "../http_connect/http_conn.h"
+class http_conn;
+
 class util_timer
 {
 public:
@@ -40,7 +42,7 @@ private:
     // 向类链表的子链表中插入timer
     void add_timer(util_timer *timer, util_timer *lst_head);
 
-private:
+public:
     util_timer *head;
     util_timer *tail;
 };
