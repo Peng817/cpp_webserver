@@ -4,6 +4,7 @@
 #include <list>
 #include <exception>
 #include <iostream>
+#include "../log/log.h"
 #include "locker.h"
 
 /*
@@ -69,7 +70,6 @@ threadPool<T>::threadPool(int thread_number, int max_request)
     // 创建若干个线程，并将它们设置为线程脱离
     for (int i = 0; i < thread_number; ++i)
     {
-        std::cout << "--create the " << i << "th thread...\n";
         // 创建线程，并将得到的线程tid存到线程池内
         if (pthread_create(&m_threads[i], NULL, worker, this) != 0)
         {
@@ -90,6 +90,8 @@ threadPool<T>::threadPool(int thread_number, int max_request)
             delete[] m_threads;
             throw std::exception();
         }
+        std::cout << "--thread pool create the " << i << "th thread...\n";
+        LOG_INFO("--thread pool create the %dth thread,pid:%ld", i, m_threads[i]);
     }
 }
 
@@ -163,7 +165,9 @@ void threadPool<T>::run()
             continue;
         }
         // 当前线程 执行 任务对象的 任务代码
+        LOG_DEBUG("--[线程池]pid=%ld 线程开始一次作业", pthread_self());
         request->process();
+        LOG_DEBUG("--[线程池]pid=%ld 线程结束一次作业", pthread_self());
     }
 }
 

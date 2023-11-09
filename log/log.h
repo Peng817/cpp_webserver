@@ -4,11 +4,19 @@
 #include <string>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <time.h>
+#include <sys/time.h>
 #include "block_queue.hpp"
 class log
 {
 public:
+    enum E_LOG_MODE
+    {
+        SYNC = 0,
+        ASYNC
+    };
+
     enum E_LOG_LEVEL
     {
         LEVEL_DEBUG = 0,
@@ -31,19 +39,22 @@ public:
             ture: 初始化成功
             false: 初始化失败
     */
-    bool init(const char *file_name, int log_buf_size,
-              int max_lines, int max_queue_size);
-
+    bool init(const char *file_name, int log_buf_size, int max_lines, int max_queue_size);
     /*
         以日志等级 + 格式化输入 生成日志行
-
         当以同步模式调用该函数，当前程序会直接将日志行输入到日志文件中
-
         当以异步模式调用该函数，当前程序将把日志行送入到阻塞队列中，
         由其他线程异步输入到日志文件中
-    */
-    void write_log(int level, const char *format, ...);
 
+        param:
+            level: 记录等级
+            file: 调用该函数记录来自的文件名(由宏生成)
+            line: 调用该函数记录来自的文件名代码的具体代码所在行号(由宏生成)
+            format,...: 格式化输入参数
+    */
+    void write_log(int level, const char *file, const int line, const char *format, ...);
+    // 将文件指针所带的缓冲强制写入到文件中，可以在调用若干次记录函数后调用一次提高效率
+    void file_flush();
     void change_log_level(int level);
 
 private:
@@ -66,21 +77,23 @@ private:
     char m_dir_name[128];
     // 日志文件名
     char m_log_name[128];
-    // 日志被打开后的c风格文件指针
+    // 临界资源：日志被打开后的c风格文件指针
     FILE *m_fp;
     // 日志的缓存区长度
     int m_log_buf_size;
-    // 日志的缓存区
+    // 临界资源：日志一行的缓存区
     char *m_buf;
     // 日志的最大行数
     int m_max_lines;
     // 日志的阻塞队列的最大长度
     int m_max_queue_size;
-    // 日志已记录的行数
+    // 临界资源：当前日志文件的行数
     long long m_count;
+    // 临界资源：当天的日志文件计数
+    int m_file_count;
     // 日志的记录模式（同步false/异步true）
     bool m_is_async;
-    // 日志类运行的当天
+    // 临界资源：日志类最近一次更新的当天(montn-day)
     int m_today;
     // 日志记录等级，默认为最低级DEBUG级
     int m_log_level;
@@ -89,5 +102,10 @@ private:
     // 多线程访问单例模式上锁
     static locker m_mutex;
 };
+
+#define LOG_DEBUG(format, ...) log::get_instance()->write_log(log::LEVEL_DEBUG, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_INFO(format, ...) log::get_instance()->write_log(log::LEVEL_INFO, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_WARN(format, ...) log::get_instance()->write_log(log::LEVEL_WARN, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_ERROR(format, ...) log::get_instance()->write_log(log::LEVEL_ERROR, __FILE__, __LINE__, format, ##__VA_ARGS__)
 
 #endif

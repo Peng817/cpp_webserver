@@ -10,13 +10,16 @@
 #include <unistd.h>
 #include <signal.h>
 #include <arpa/inet.h>
+
 #include "thread_pool/locker.h"
 #include "thread_pool/threadPool.hpp"
 #include "http_connect/http_conn.h"
+#include "log/log.h"
 
 const int MAX_FD = 65535;            // 最大文件描述符个数
 const int MAX_EVENT_NUMBER = 100000; // 最大事件个数
 const int TIME_SLOT = 5;             // alarm信号频率
+const int LOG_MODE = log::ASYNC;     // 写日志的模式
 static int pipefd[2];
 
 /*
@@ -78,11 +81,29 @@ void addsig(int sig, void(handler)(int), bool restart = false)
 void cb_func(http_conn *user)
 {
     printf("--timer call back it's client to close fd %d\n", user->getSockfd());
+    LOG_INFO("--timer call back it's client to close fd %d", user->getSockfd());
     user->close_conn();
 }
 
 int main(int argc, char *argv[])
 {
+    // 开启日志
+    if (LOG_MODE == log::SYNC)
+    {
+        // 同步日志模型
+        log::get_instance()->init("./ServerLog.log", 2048, 80000, 0);
+    }
+    else if (LOG_MODE == log::ASYNC)
+    {
+        // 异步日志模型
+        log::get_instance()->init("./ServerLog.log", 2048, 80000, 32);
+    }
+    // for (int i = 0; i < 15; i++)
+    // {
+    //     LOG_INFO("--测试分页");
+    // }
+    // log::get_instance()->file_flush();
+
     if (argc <= 2)
     {
         printf("按照如下格式运行：%s ip_address port_number \n", basename(argv[0]));
@@ -92,6 +113,9 @@ int main(int argc, char *argv[])
     const char *ip = argv[1];
     // 获取端口号
     int port = atoi(argv[2]);
+    LOG_INFO("--服务器预设参数: IP:%s, PORT:%d", ip, port);
+    log::get_instance()->file_flush();
+
     // 对SIGPIPE信号做处理，实际处理是忽略
     /*
     参考书p189，默认情况下，向一个读端关闭的管道或者socket连接中写数据将触发SIGPIPE信号，
@@ -185,6 +209,7 @@ int main(int argc, char *argv[])
     用于承接传入的epollfd值，而使得每个连接对象都可以在送入监听队列时，进入同一个
     epoll监听队列。
     */
+    LOG_INFO("--服务器开始运行");
     while (!stop_server)
     {
         //-1代表永久阻塞
@@ -232,6 +257,7 @@ int main(int argc, char *argv[])
                 printf("--build 1 timer...\n");
                 users[cfd].init(cfd, clientAddress, timer);
                 timerList->add_timer(timer);
+                LOG_INFO("--build 1 timer,1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
             }
             else if ((sockfd == pipefd[0]) && (epollEvents[i].events & EPOLLIN))
             {
@@ -263,7 +289,6 @@ int main(int argc, char *argv[])
                         case SIGTERM:
                         case SIGINT:
                         {
-                            printf("\n--正在退出，释放资源确保安全...\n");
                             stop_server = true;
                         }
                         }
@@ -289,6 +314,7 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
+                        LOG_INFO("--adjust timer once");
                         timerList->adjust_timer(timer);
                     }
                     pool->append(&users[sockfd]);
@@ -325,6 +351,7 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
+                        LOG_INFO("--adjust timer once");
                         timerList->adjust_timer(timer);
                     }
                 }
@@ -351,5 +378,11 @@ int main(int argc, char *argv[])
     delete[] users;
     delete timerList;
     delete pool;
+    LOG_INFO("--服务器安全关闭");
+    printf("\n--正在退出，释放资源确保安全...\n");
+    if (LOG_MODE == log::ASYNC)
+    {
+        sleep(1);
+    }
     return 0;
 }

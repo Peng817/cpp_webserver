@@ -85,7 +85,6 @@ void http_conn::process()
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
-    // std::cout << "--已经解析请求，即将发出响应报文\n";
     //  生成响应
     //  传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
     bool writeReturn = processResponse(parseReturn);
@@ -95,6 +94,7 @@ void http_conn::process()
         close_conn();
     }
     // 写入到缓存，将连接作为任务丢入到epoll连接队列中，声明其写就绪
+
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
     // 结束线程
 }
@@ -152,6 +152,10 @@ void http_conn::close_conn()
         m_timer = NULL;
         m_user_count--;
         printf("--http_conn class close connect,and pointer to timer in http_conn set to NULL.\n");
+        LOG_INFO("--http_conn class close connect,and pointer to timer in http_conn set to NULL.");
+        LOG_INFO("--delete 1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
+        // 每次结束一个连接，则将日志文件指针维护的缓存强推到日志文件里，刷新缓存
+        log::get_instance()->file_flush();
     }
 }
 
@@ -202,9 +206,8 @@ bool http_conn::read()
             m_read_idx += bytesRead;
         }
     }
-    std::cout << "--已经读到数据:\n";
-    // std::cout << "--一次性读到数据:\n"
-    //           << m_read_buf << std::endl;
+    std::cout << "--接收到请求报文...\n";
+    LOG_INFO("--接收到请求报文如下:\n%s", m_read_buf);
     return true;
 }
 
@@ -269,10 +272,13 @@ bool http_conn::write()
             // 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否立即关闭连接
             unmap();
             std::cout << "--已经发出" << m_bytes_have_send << " bytes 数据。\n";
+            LOG_INFO("--已经发出%d bytes数据", m_bytes_have_send);
+            LOG_INFO("--发送响应报文头如下:\n%s", m_write_buf);
             modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)
             {
-                std::cout << "--connect is keep-alive!\n";
+                std::cout << "--connect is keep-alive...\n";
+                LOG_INFO("--connect is keep-alive...");
                 // 对除了对象本身的sockfd和地址以外，连接对象其余的成员数据清空
                 init();
                 return true;
@@ -280,7 +286,8 @@ bool http_conn::write()
             else
             {
                 // 返回了false，之后本对象指向的连接将关闭。
-                std::cout << "--connect is not keep-alive!\n";
+                std::cout << "--connect is not keep-alive.\n";
+                LOG_INFO("--connect is not keep-alive...");
                 return false;
             }
         }

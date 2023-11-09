@@ -164,7 +164,7 @@ inline bool block_queue<T>::push(const T &item)
         m_cond.broadcast();
         return false;
     }
-    m_back = (m_back + 1) & m_max_size;
+    m_back = (m_back + 1) % m_max_size;
     m_array[m_back] = item; // 赋值函数，每次入队都会发生一次拷贝
     m_size++;
     m_mutex.unlock();
