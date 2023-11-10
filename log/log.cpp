@@ -28,10 +28,13 @@ void get_next_log_full_name(char *next_full_name, size_t size, char *full_name, 
     }
 }
 
-bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_queue_size)
+bool log::init(int level, const char *file_name, int log_buf_size, int max_lines, int max_queue_size)
 {
     m_log_buf_size = log_buf_size;
     m_max_lines = max_lines;
+    m_log_level = level;
+    m_count = 0;
+    m_file_count = 0;
     /*
         生成日志文件，并打开
     */
@@ -39,7 +42,6 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
     struct timeval cur = {0, 0};
     // 使用getttimeofday可以获得微秒信息
     gettimeofday(&cur, NULL);
-
     /*
         time(), localtime(&time),struct tm 来自于 c语言
         struct tm {
@@ -57,6 +59,8 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
     */
     // 获取当前时间的tm结构体
     struct tm *tm_cur = localtime(&cur.tv_sec);
+    m_today = tm_cur->tm_mday;
+
     // 日志文件创建的绝对路径/相对路径
     char log_full_name[256] = {0};
     // 从后往前找到参数filename中第一个/的位置
@@ -83,7 +87,15 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
                  tm_cur->tm_mday, m_log_name);
     }
 
+    // ******临界
+    m_mutex.lock();
     //"a":追加到一个文件。写操作向文件末尾追加数据。如果文件不存在，则创建文件。
+    if (m_fp)
+    {
+        file_flush();
+        fclose(m_fp);
+    }
+
     m_fp = fopen(log_full_name, "a+");
     if (m_fp == NULL)
     {
@@ -93,7 +105,6 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
     // 由于日志类是单例模式，因此所有成员指针指向的数据都应该在堆区上
     m_buf = new char[m_log_buf_size];
     memset(m_buf, '\0', m_log_buf_size); // 缓存初始化
-
     // TODO:可以优化检查，以文件为单位检查而不是逐行检查
     while (fgets(m_buf, m_log_buf_size, m_fp))
     {
@@ -132,42 +143,45 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
         }
     }
     memset(m_buf, '\0', m_log_buf_size); // 缓存初始化
+    m_mutex.unlock();
+    //******出临界区
+
     m_today = tm_cur->tm_mday;
     /*
         异步模式：设置阻塞队列的长度 > 0，
         同步模式: 应设置阻塞队列长度 = 0
     */
+    std::string title;
+    title += "\n";
+    title += "                       _    _                \n";
+    title += "  _ __ ___   ___  _ __| | _| |    ___   __ _ \n";
+    title += " | '_ ` _ \\ / _ \\| '__| |/ / |   / _ \\ / _` |       _ _/|\n";
+    title += " | | | | | | (_) | |  |   <| |__| (_) | (_| |       \\o.0|\n";
+    title += " |_| |_| |_|\\___/|_|  |_|\\_\\_____\\___/ \\__, |      =(___)=\n";
+    title += "                                       |___/ \n";
     if (max_queue_size > 0)
     {
-        m_is_async = true;
-        m_log_queue = new block_queue<std::string>(max_queue_size);
-        pthread_t tid;
-        // 模仿线程池的构建，对这部分代码进行优化
-        if (pthread_create(&tid, NULL, work, NULL) != 0)
+        if (m_async_thread == 0)
         {
-            // 这部分资源其实也能交给析构函数释放，此处有点多余
-            delete m_log_queue;
-            m_log_queue = NULL;
-            return false;
+            m_is_async = true;
+            m_log_queue = new block_queue<std::string>(max_queue_size);
+            // 模仿线程池的构建，对这部分代码进行优化
+            if (pthread_create(&m_async_thread, NULL, work, NULL) != 0)
+            {
+                // 这部分资源其实也能交给析构函数释放，此处有点多余
+                delete m_log_queue;
+                m_log_queue = NULL;
+                return false;
+            }
         }
-        // 设置为脱离线程，让系统帮助回收线程
-        if (pthread_detach(tid))
-        {
-            // 若脱离失败，则有责释放创建好的线程，和其他资源一起释放
-            delete &tid;
-            delete m_log_queue;
-            m_log_queue = NULL;
-            return false;
-        }
-        // 脱离后的线程无需管理，析构函数也不再考虑
-        printf("--日志异步模式开启,异步线程tid:%ld\n", tid);
-        LOG_INFO("--开启日志--\n-------------------------------------------------------\n-------------------------------------------------------");
-        LOG_DEBUG("--日志异步模式开启,异步线程tid:%ld", tid);
+        printf("--日志异步模式开启,异步线程tid:%ld\n", m_async_thread);
+        LOG_INFO("%s", title.c_str());
+        LOG_DEBUG("--日志异步模式开启,异步线程tid:%ld", m_async_thread);
     }
     else
     {
         printf("--日志同步模式开启\n");
-        LOG_INFO("--开启日志--\n-------------------------------------------------------\n-------------------------------------------------------");
+        LOG_INFO("%s", title.c_str());
         LOG_DEBUG("--日志同步模式开启");
     }
 
@@ -176,6 +190,10 @@ bool log::init(const char *file_name, int log_buf_size, int max_lines, int max_q
 
 void log::write_log(int level, const char *file, const int line, const char *format, ...)
 {
+    if (level < m_log_level)
+    {
+        return;
+    }
     // 获取使用当前函数时的时间
     struct timeval cur = {0, 0};
     // 使用getttimeofday可以获得微秒信息
@@ -288,17 +306,27 @@ void log::write_log(int level, const char *file, const int line, const char *for
 
 void log::file_flush()
 {
+    if (m_is_async)
+    {
+        m_log_queue->flush();
+    }
     m_mutex.lock();
     fflush(m_fp);
     m_mutex.unlock();
 }
 
-void log::change_log_level(int level)
+int log::get_log_level()
+{
+    return m_log_level;
+}
+
+void log::set_log_level(int level)
 {
     m_log_level = level;
 }
 
-log::log() : m_count(0), m_file_count(1), m_is_async(false), m_log_queue(NULL), m_buf(NULL)
+log::log() : m_count(0), m_file_count(1), m_is_async(false),
+             m_log_queue(NULL), m_buf(NULL), m_async_thread(0)
 {
     /*
         默认构造函数将使得日志记录为0，日志记录模式默认为同步,
@@ -310,6 +338,21 @@ log::log() : m_count(0), m_file_count(1), m_is_async(false), m_log_queue(NULL), 
 
 log::~log()
 {
+    if (m_async_thread != 0)
+    {
+        while (m_log_queue && !m_log_queue->empty())
+        {
+            // 使得任务队列中的任务全部完成
+            m_log_queue->flush();
+        }
+        // 关闭队列将使得异步线程执行的函数结束
+        m_mutex.lock();
+        m_log_queue->close();
+        m_mutex.unlock();
+        pthread_join(m_async_thread, NULL);
+        // printf("--日志异步线程已回收,tid=%ld\n", m_async_thread);
+        m_async_thread = 0;
+    }
     // 如果阻塞队列指针非空，代表存在一个new出来的阻塞队列，需要及时释放
     if (!m_log_queue)
     {
@@ -323,7 +366,10 @@ log::~log()
     // 关闭对象打开的文件指针
     if (m_fp != NULL)
     {
+        file_flush();
+        m_mutex.lock();
         fclose(m_fp);
+        m_mutex.unlock();
     }
 }
 
@@ -365,6 +411,6 @@ void log::async_write_log()
         m_mutex.lock();
         fputs(single_log.c_str(), m_fp);
         m_mutex.unlock();
-        printf("--tid:%ld log async-thread finish 1 job.\n", pthread_self());
+        // printf("--tid:%ld log async-thread finish 1 job.\n", pthread_self());
     }
 }

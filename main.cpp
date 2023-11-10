@@ -91,12 +91,12 @@ int main(int argc, char *argv[])
     if (LOG_MODE == log::SYNC)
     {
         // 同步日志模型
-        log::get_instance()->init("./ServerLog.log", 2048, 80000, 0);
+        log::get_instance()->init(log::LEVEL_DEBUG, "./ServerLog.log", 2048, 80000, 0);
     }
     else if (LOG_MODE == log::ASYNC)
     {
         // 异步日志模型
-        log::get_instance()->init("./ServerLog.log", 2048, 80000, 32);
+        log::get_instance()->init(log::LEVEL_DEBUG, "./ServerLog.log", 2048, 80000, 32);
     }
     // for (int i = 0; i < 15; i++)
     // {
@@ -371,6 +371,7 @@ int main(int argc, char *argv[])
     } // while()
 
     // epoll监听失败时或者进程终止时，会跳出死循环，在监听失败后，为其收尾
+    printf("--正在退出，释放资源确保安全...\n");
     close(epollfd);
     close(listenfd);
     close(pipefd[1]);
@@ -379,10 +380,5 @@ int main(int argc, char *argv[])
     delete timerList;
     delete pool;
     LOG_INFO("--服务器安全关闭");
-    printf("\n--正在退出，释放资源确保安全...\n");
-    if (LOG_MODE == log::ASYNC)
-    {
-        sleep(1);
-    }
     return 0;
 }

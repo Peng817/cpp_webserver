@@ -90,9 +90,10 @@ threadPool<T>::threadPool(int thread_number, int max_request)
             delete[] m_threads;
             throw std::exception();
         }
-        std::cout << "--thread pool create the " << i << "th thread...\n";
-        LOG_INFO("--thread pool create the %dth thread,pid:%ld", i, m_threads[i]);
+        LOG_DEBUG("--thread pool create the %dth thread,pid:%ld", i, m_threads[i]);
     }
+    printf("--thread pool has created %d threads...\n", m_thread_number);
+    LOG_INFO("--thread pool has created %d threads...", m_thread_number);
 }
 
 template <typename T>

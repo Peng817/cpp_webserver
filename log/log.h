@@ -39,7 +39,7 @@ public:
             ture: 初始化成功
             false: 初始化失败
     */
-    bool init(const char *file_name, int log_buf_size, int max_lines, int max_queue_size);
+    bool init(int level, const char *file_name, int log_buf_size, int max_lines, int max_queue_size);
     /*
         以日志等级 + 格式化输入 生成日志行
         当以同步模式调用该函数，当前程序会直接将日志行输入到日志文件中
@@ -55,7 +55,8 @@ public:
     void write_log(int level, const char *file, const int line, const char *format, ...);
     // 将文件指针所带的缓冲强制写入到文件中，可以在调用若干次记录函数后调用一次提高效率
     void file_flush();
-    void change_log_level(int level);
+    void set_log_level(int level);
+    int get_log_level();
 
 private:
     log();
@@ -97,6 +98,8 @@ private:
     int m_today;
     // 日志记录等级，默认为最低级DEBUG级
     int m_log_level;
+    // 异步线程号
+    pthread_t m_async_thread;
     // 阻塞任务队列，一个任务即为一个string，表示一行记录
     block_queue<std::string> *m_log_queue;
     // 多线程访问单例模式上锁

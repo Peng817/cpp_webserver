@@ -13,10 +13,10 @@ public:
     void clear();
     bool full();
     bool empty();
-    bool front(T &value);
-    bool back(T &value);
-    int size();
-    int max_size();
+    bool pop_front(T &value);
+    bool pop_back(T &value);
+    int get_size();
+    int get_max_size();
     /*
     往队列尾添加元素，最终将所有等待队列元素的线程唤醒
     生产者角色
@@ -26,6 +26,10 @@ public:
     从队列头拿取元素，无元素则将阻塞等待
     */
     bool pop(T &item);
+    // 发出唤醒信号，请求清理一下队列
+    void flush();
+    // 关闭队列，队列不再能拿出东西，所有阻塞进程都不再阻塞返回false
+    void close();
 
 private:
     locker m_mutex;
@@ -35,6 +39,7 @@ private:
     int m_max_size;
     int m_front;
     int m_back;
+    bool m_is_close;
 };
 
 template <class T>
@@ -47,11 +52,13 @@ inline block_queue<T>::block_queue(int max_size) : m_mutex(locker()), m_cond(con
     }
     // 在构造时new[]一片空间存放T的数组，析构时将会delete[]
     m_array = new T[max_size];
+    m_is_close = false;
 }
 
 template <class T>
 inline block_queue<T>::~block_queue()
 {
+    close();
     // 上互斥锁确保析构函数是原子操作
     m_mutex.lock();
     if (m_array != NULL)
@@ -88,7 +95,7 @@ template <class T>
 inline bool block_queue<T>::empty()
 {
     m_mutex.lock();
-    if (0 != m_size)
+    if (0 >= m_size)
     {
         m_mutex.unlock();
         return true;
@@ -98,7 +105,7 @@ inline bool block_queue<T>::empty()
 }
 
 template <class T>
-inline bool block_queue<T>::front(T &value)
+inline bool block_queue<T>::pop_front(T &value)
 {
     /*
     尝试以更符合规范的方式想实现 T& front(),结果发现，这样的实现模式需要在
@@ -118,7 +125,7 @@ inline bool block_queue<T>::front(T &value)
 }
 
 template <class T>
-inline bool block_queue<T>::back(T &value)
+inline bool block_queue<T>::pop_back(T &value)
 {
     // 原子化操作读数组尾值
     m_mutex.lock();
@@ -133,7 +140,7 @@ inline bool block_queue<T>::back(T &value)
 }
 
 template <class T>
-inline int block_queue<T>::size()
+inline int block_queue<T>::get_size()
 {
     // 此处需要额外申请变量，纯粹是因为无法return临界区的值
     int tmp = 0;
@@ -144,7 +151,7 @@ inline int block_queue<T>::size()
 }
 
 template <class T>
-inline int block_queue<T>::max_size()
+inline int block_queue<T>::get_max_size()
 {
     int tmp = 0;
     m_mutex.lock();
@@ -185,6 +192,11 @@ inline bool block_queue<T>::pop(T &item)
             m_mutex.unlock();
             return false;
         }
+        if (m_is_close)
+        {
+            m_mutex.unlock();
+            return false;
+        }
     }
     /* m_front,m_size都属于临界资源，读写时都需在上锁的状态下进行 */
     m_front = (m_front + 1) % m_max_size;
@@ -192,6 +204,22 @@ inline bool block_queue<T>::pop(T &item)
     m_size--;
     m_mutex.unlock();
     return true;
+}
+
+template <class T>
+inline void block_queue<T>::flush()
+{
+    m_cond.signal();
+}
+
+template <class T>
+inline void block_queue<T>::close()
+{
+    clear();
+    m_mutex.lock();
+    m_is_close = true;
+    m_mutex.unlock();
+    m_cond.broadcast();
 }
 
 #endif
