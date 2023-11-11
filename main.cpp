@@ -1,7 +1,6 @@
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
-// #include <libgen.h>
 #include <string.h>
 #include <sys/types.h>
 #include <cassert>
@@ -11,15 +10,24 @@
 #include <unistd.h>
 #include <signal.h>
 #include <arpa/inet.h>
+
 #include "thread_pool/locker.h"
 #include "thread_pool/threadPool.hpp"
 #include "http_connect/http_conn.h"
+#include "log/log.h"
 
 const int MAX_FD = 65535;            // 最大文件描述符个数
 const int MAX_EVENT_NUMBER = 100000; // 最大事件个数
 const int TIME_SLOT = 5;             // alarm信号频率
+const int LOG_MODE = log::ASYNC;     // 写日志的模式
 static int pipefd[2];
-/* 感觉是不是不用extern应该也行，但此处使用extern是为了强调该两个函数来自于另外文件 */
+
+/*
+感觉不用extern应该也行，此处使用extern是为了强调以下函数是声明，但不加其实系统也不会认定为定义
+
+为什么这几个函数需要声明?因为这几个函数仅出现在连接类的源文件中，而没有出现在头文件中，所以当
+本文件需要使用另一个源文件的函数时，就需要声明，除非连接类的源文件的函数已经在头文件中声明过。
+ */
 
 extern void addfd(int epollfd, int fd, uint32_t ev);
 extern void removefd(int epollfd, int fd);
@@ -29,35 +37,41 @@ extern int setNoBlocking(int fd);
 // 信号处理函数
 void sigHandler(int sig)
 {
+    /* 保留原来的errno,在函数的最后恢复，以保证函数的可重入性 */
     int saveErrno = errno;
     int msg = sig;
     send(pipefd[1], (char *)&msg, 1, 0);
     errno = saveErrno;
 }
 
-// 添加用于定时器的信号捕捉
-// TODO:尚不清楚信号反应结构体多一个SA_RESTART参数会有什么影响。
-// 为了确保函数正确运行，对不同场景的信号使用不同的注册机制
-void addRestartSig(int sig, void(handler)(int))
-{
-    struct sigaction sa;
-    memset(&sa, '\0', sizeof(sa));
-    sa.sa_handler = handler;
-    // 将信号反应结构体的参数flag添加上 SA_RESTART，这将重新调用被该信号终止的信号调用
-    sa.sa_flags |= SA_RESTART;
-    // 将sa的临时阻塞信号集设置为都阻塞的
-    sigfillset(&sa.sa_mask);
-    // 注册信号到信号捕捉体中，后者会在接收到信号后，搭建起临时阻塞集并执行处理函数
-    sigaction(sig, &sa, NULL);
-}
-
 // 添加信号捕捉
-void addsig(int sig, void(handler)(int))
+// 为了确保函数正确运行，对不同场景的信号使用不同的注册机制
+void addsig(int sig, void(handler)(int), bool restart = false)
 {
+    /*
+    多一个SA_RESTART参数的影响：
+    发送信号时候，若当前进程处于慢速系统调用的阻塞状态 即当前的系统调用还没有执行完毕
+    突然来一个信号 那么我是不是就要立即进行执行信号处理 而且我的这个传送的信号没有被屏蔽
+    如果不加SA_RESTART，则新出现的信号将会导致已有的系统调用终止，返回-1，异常终止
+    但加了SA_RESTART，则新出现的信号在终止已有的系统调用后将重新调用，则确保最后还是会执行
+    完系统调用。
+    本项目RESTART主要用于当向管道中写信息的信号处理函数，管道写是一个慢速的io系统调用，
+    如果我们在发送终止信号或发出新的alarm信号时，无论管道写 写没写完，则由于这俩信号有START,
+    确保即使发生了新的信号产生再次调用了管道写，能使得产生新的管道写而不是失败，从而及时将终止信号
+    /新的alarm写入到管道中，使得主程序具备立马处理终止信号或下一个alarm的能力，
+    如下面main中的case:SIGTERM，这将导致立即的进程主循环的正确跳出，从而执行尾部的资源释放操作。
+
+    在vscode的gdb调试模式下，似乎按ctrl c没法正确触发，但是在linux原生环境中启动的程序可以正确触发终止
+    */
     struct sigaction sa;
     memset(&sa, '\0', sizeof(sa));
     sa.sa_handler = handler;
     // 将sa的临时阻塞信号集设置为都阻塞的
+    if (restart)
+    {
+        // 书上的解释为 重新调用被该信号终止的系统调用
+        sa.sa_flags |= SA_RESTART;
+    }
     sigfillset(&sa.sa_mask);
     // 注册信号到信号捕捉体中，后者会在接收到信号后，搭建起临时阻塞集并执行处理函数
     sigaction(sig, &sa, NULL);
@@ -67,11 +81,29 @@ void addsig(int sig, void(handler)(int))
 void cb_func(http_conn *user)
 {
     printf("--timer call back it's client to close fd %d\n", user->getSockfd());
+    LOG_INFO("--timer call back it's client to close fd %d", user->getSockfd());
     user->close_conn();
 }
 
 int main(int argc, char *argv[])
 {
+    // 开启日志
+    if (LOG_MODE == log::SYNC)
+    {
+        // 同步日志模型
+        log::get_instance()->init(log::LEVEL_DEBUG, "./ServerLog.log", 2048, 80000, 0);
+    }
+    else if (LOG_MODE == log::ASYNC)
+    {
+        // 异步日志模型
+        log::get_instance()->init(log::LEVEL_DEBUG, "./ServerLog.log", 2048, 80000, 32);
+    }
+    // for (int i = 0; i < 15; i++)
+    // {
+    //     LOG_INFO("--测试分页");
+    // }
+    // log::get_instance()->file_flush();
+
     if (argc <= 2)
     {
         printf("按照如下格式运行：%s ip_address port_number \n", basename(argv[0]));
@@ -81,7 +113,20 @@ int main(int argc, char *argv[])
     const char *ip = argv[1];
     // 获取端口号
     int port = atoi(argv[2]);
+    LOG_INFO("--服务器预设参数: IP:%s, PORT:%d", ip, port);
+    log::get_instance()->file_flush();
+
     // 对SIGPIPE信号做处理，实际处理是忽略
+    /*
+    参考书p189，默认情况下，向一个读端关闭的管道或者socket连接中写数据将触发SIGPIPE信号，
+    我们需要处理并至少忽略它，因为程序接收到SIGPIPE信号的默认行为是结束进程。
+    用于代替SIGPIPE得知读端关闭的方法有两种，在我们忽略掉SIGPIPE之后，我们仍然可以知道
+    写数据时连接的读端是否关闭，从而做出应对。
+    本项目的采取就是使用epoll监听，对于管道的读端关闭时，写端文件描述符上的POLLHUP事件将被触发
+    对于socke连接的读端被对方关闭关闭时，socket上的POLLRDHUP事件将被触发
+    本项目并未监听管道写端文件描述符，所以POLLHUP没有作用于管道的读端关闭
+
+    */
     addsig(SIGPIPE, SIG_IGN);
     // 创建线程池，并初始化线程池
     threadPool<http_conn> *pool = NULL;
@@ -103,7 +148,7 @@ int main(int argc, char *argv[])
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd != -1);
     /*
-    将服务器的端口设置为复用是因为，当服务器异常终止结束时，则由于在TCP连接中，服务器是
+    将服务器的端口设置为复用是因为，在服务器异常终止结束的情景下，由于在TCP连接中，服务器是
     主动发起关闭连接的一方，因此需要在连接中接收到客户端返回的LAST_ASK后，还要继续等待
     2MSL时间，而这将是使得我们不能在服务器程序主动关闭后立即重新启动的原因，因为此时上一次连接
     还未立马断开。为了强制进程立即使用出于TIME_WAIT状态连接占用的端口，我们将监听的socket选项
@@ -137,11 +182,13 @@ int main(int argc, char *argv[])
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
     assert(ret != -1);
     setNoBlocking(pipefd[1]);
+    // 为了效率，管道的读端的监听事件也采用了ET工作模式
     addfd(epollfd, pipefd[0], EPOLLIN | EPOLLET);
 
-    /* 注册信号 */
-    addRestartSig(SIGALRM, sigHandler);
-    addRestartSig(SIGTERM, sigHandler);
+    /* 注册带Restart信号 */
+    addsig(SIGALRM, sigHandler, true);
+    addsig(SIGTERM, sigHandler, true);
+    addsig(SIGINT, sigHandler, true);
 
     http_conn::m_epollfd = epollfd;
     bool stop_server = false;
@@ -162,6 +209,7 @@ int main(int argc, char *argv[])
     用于承接传入的epollfd值，而使得每个连接对象都可以在送入监听队列时，进入同一个
     epoll监听队列。
     */
+    LOG_INFO("--服务器开始运行");
     while (!stop_server)
     {
         //-1代表永久阻塞
@@ -209,11 +257,15 @@ int main(int argc, char *argv[])
                 printf("--build 1 timer...\n");
                 users[cfd].init(cfd, clientAddress, timer);
                 timerList->add_timer(timer);
+                LOG_INFO("--build 1 timer,1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
             }
             else if ((sockfd == pipefd[0]) && (epollEvents[i].events & EPOLLIN))
             {
-                int sig;
                 char signals[1024];
+                /*
+                TODO:明明写入管道的是单个ASCII码的char型数据，接收管道却要用一个1024字符串接收
+                难道是因为管道的读端的监听模式是ET模式，所以也需要一次性将管道的数据全部读完？
+                */
                 ret = recv(pipefd[0], signals, sizeof(signals), 0);
                 if (ret == -1)
                 {
@@ -235,11 +287,10 @@ int main(int argc, char *argv[])
                             break; // 该break跳出的是for循环
                         }
                         case SIGTERM:
+                        case SIGINT:
                         {
                             stop_server = true;
                         }
-                        default:
-                            break;
                         }
                     }
                 }
@@ -247,11 +298,6 @@ int main(int argc, char *argv[])
             else if (epollEvents[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
                 // 如果监听到的连接事件是异常事件，则关闭连接。
-                /*
-                TODO：比较不理解的在于为什么在前面只监听了EPOLLRDHUP和EPOLLIN事件，在这却
-                需要检核错误时检测多出来的EPOLLUP和EPOLLERR事件，难道这两个不用主动声明也会
-                被监听到吗
-                */
                 if (timer)
                 {
                     timerList->del_timer(timer);
@@ -268,6 +314,7 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
+                        LOG_INFO("--adjust timer once");
                         timerList->adjust_timer(timer);
                     }
                     pool->append(&users[sockfd]);
@@ -304,6 +351,7 @@ int main(int argc, char *argv[])
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIME_SLOT;
                         printf("--adjust timer once\n");
+                        LOG_INFO("--adjust timer once");
                         timerList->adjust_timer(timer);
                     }
                 }
@@ -322,7 +370,8 @@ int main(int argc, char *argv[])
 
     } // while()
 
-    // epoll监听失败时，会跳出死循环，在监听失败后，为其收尾
+    // epoll监听失败时或者进程终止时，会跳出死循环，在监听失败后，为其收尾
+    printf("--正在退出，释放资源确保安全...\n");
     close(epollfd);
     close(listenfd);
     close(pipefd[1]);
@@ -330,5 +379,7 @@ int main(int argc, char *argv[])
     delete[] users;
     delete timerList;
     delete pool;
+    LOG_INFO("--服务器安全关闭");
+    // printf("1\n");
     return 0;
 }

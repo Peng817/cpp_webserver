@@ -46,6 +46,7 @@ void sort_timer_lst::del_timer(util_timer *timer)
         return;
     }
     printf("--delete 1 tiemr.\n");
+    LOG_INFO("--delete 1 tiemr.");
     if ((timer == head) && (timer == tail))
     {
         delete timer;

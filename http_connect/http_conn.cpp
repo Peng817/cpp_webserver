@@ -85,7 +85,6 @@ void http_conn::process()
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
-    // std::cout << "--已经解析请求，即将发出响应报文\n";
     //  生成响应
     //  传入的parseReturn可能是除了noreq之外的所有状态包括bad和一些成功的格式
     bool writeReturn = processResponse(parseReturn);
@@ -95,6 +94,7 @@ void http_conn::process()
         close_conn();
     }
     // 写入到缓存，将连接作为任务丢入到epoll连接队列中，声明其写就绪
+
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
     // 结束线程
 }
@@ -102,7 +102,7 @@ void http_conn::process()
 void http_conn::init(int sockfd, const struct sockaddr_in &addr)
 {
     m_sockfd = sockfd;
-    // TODO:直接对结构体使用赋值构造函数?
+    // TODO:直接对结构体使用赋值函数?
     m_address = addr;
     /*
     一般来说，端口复用是为了让主动关闭的那一端在重启之后也能强制忽略上一次进程中已建立连接的还没完全断开的状态
@@ -110,6 +110,23 @@ void http_conn::init(int sockfd, const struct sockaddr_in &addr)
     */
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    /*
+    ET的工作模式：对于其上注册的一次事件，每次就绪时只触发一次
+    ONESHOT的工作模式：对于一个文件描述符，只最多触发一个事件，且只触发一次。
+    用EPOLLSHOT的原因：
+     由于TCP的IO连接的工作环境处于多线程环境下，如果不用ONESHOT，即使使用了ET的epoll
+     监听模式，在一个线程监听到ET模式的EPOLLIN后，去进行处理，此时如果在处理的过程
+     中，该连接又传来数据，虽然线程准备一口气全部读完，但是由于新的就绪又将触发一次
+     ET模式下EPOLLIN，这将导致新的线程得到信号，也来处理该连接的读缓存，这将导致在
+     多线程环境下，多个线程处理一个连接，这不是我们所期望的。所以使用EPOLLSHOT，确保
+     多线程环境下，一个连接的读就绪仅会触发一次，这确保了只会有一个线程来处理该连接
+     触发后，线程将会不断读，直到将连接的数据读完，则才会重新注册事件，使得连接能再次被读写
+
+    EPOLLSHOT模式在当前项目的伪proactor模式下，貌似不起作用，因为在该模式下，
+    处理连接读写的仅有主线程，而辅助的多线程并不参与到连接上的读写过程。所以按理说
+    即使不采用ONESHOT模式，该项目也能正常运行，但如果采用的是REACTOR事件模式，则
+    由辅助线程来自行进行数据的读写，则十分有必要添加ONESHOT监听事件模式。
+    */
     addfd(m_epollfd, m_sockfd, EPOLLIN | EPOLLONESHOT | EPOLLET);
     m_user_count++;
     init();
@@ -135,6 +152,10 @@ void http_conn::close_conn()
         m_timer = NULL;
         m_user_count--;
         printf("--http_conn class close connect,and pointer to timer in http_conn set to NULL.\n");
+        LOG_INFO("--http_conn class close connect,and pointer to timer in http_conn set to NULL.");
+        LOG_INFO("--delete 1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
+        // 每次结束一个连接，则将日志文件指针维护的缓存强推到日志文件里，刷新缓存
+        log::get_instance()->file_flush();
     }
 }
 
@@ -185,9 +206,10 @@ bool http_conn::read()
             m_read_idx += bytesRead;
         }
     }
-    std::cout << "--已经读到数据:\n";
-    // std::cout << "--一次性读到数据:\n"
-    //           << m_read_buf << std::endl;
+    char ip[16] = {0};
+    inet_ntop(AF_INET, &m_address.sin_addr.s_addr, ip, INET_ADDRSTRLEN);
+    std::cout << "--接收到请求报文...\n";
+    LOG_INFO("--从%s:%d接收到请求报文如下:\n%s", ip, m_address.sin_port, m_read_buf);
     return true;
 }
 
@@ -252,10 +274,15 @@ bool http_conn::write()
             // 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否立即关闭连接
             unmap();
             std::cout << "--已经发出" << m_bytes_have_send << " bytes 数据。\n";
+            char ip[16] = {0};
+            inet_ntop(AF_INET, &m_address.sin_addr.s_addr, ip, INET_ADDRSTRLEN);
+            LOG_INFO("--已向%s:%d发出%d bytes数据", ip, m_address.sin_port, m_bytes_have_send);
+            LOG_INFO("--发送响应报文头如下:\n%s", m_write_buf);
             modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)
             {
-                std::cout << "--connect is keep-alive!\n";
+                std::cout << "--connect is keep-alive...\n";
+                LOG_INFO("--connect is keep-alive...");
                 // 对除了对象本身的sockfd和地址以外，连接对象其余的成员数据清空
                 init();
                 return true;
@@ -263,7 +290,8 @@ bool http_conn::write()
             else
             {
                 // 返回了false，之后本对象指向的连接将关闭。
-                std::cout << "--connect is not keep-alive!\n";
+                std::cout << "--connect is not keep-alive.\n";
+                LOG_INFO("--connect is not keep-alive...");
                 return false;
             }
         }
@@ -612,7 +640,7 @@ http_conn::LINE_STATUS http_conn::parseLine()
             */
             /*
              TODO：逻辑上，由于上一个if使得函数以OPEN形态结束时，checked_idx
-             并未增加到后一位，而是保留在'\r'处，所以重启线程执行时，指针不存在
+             并未增加到后一位，而是保留在'\r'处，所以重启线程执行时，指针应当不存在
              会指到'\n'的情况。
             */
             if ((m_checked_idx > 1) && m_read_buf[m_read_idx - 1] == '\r')
@@ -692,6 +720,7 @@ bool http_conn::add_content(const char *content)
     return add_response("%s", content);
 }
 
+// c语言中的可变参数函数,利用vsnprintf在wtire buf中格式写
 bool http_conn::add_response(const char *format, ...)
 {
     // 如果写的索引大于写缓冲区，则返回错误
@@ -711,7 +740,9 @@ bool http_conn::add_response(const char *format, ...)
         参数4：参数列表
     */
 
-    int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);
+    int len = vsnprintf(m_write_buf + m_write_idx,
+                        WRITE_BUFFER_SIZE - 1 - m_write_idx,
+                        format, arg_list);
     if (len >= (WRITE_BUFFER_SIZE - 1 - m_write_idx))
     {
         return false;
@@ -729,7 +760,7 @@ bool http_conn::add_content_length(int content_len)
 
 bool http_conn::add_content_type()
 {
-    return add_response("Content-Type:%s\r\n", "text/html");
+    return add_response("Content-Type: %s\r\n", "text/html");
 }
 
 bool http_conn::add_linger()

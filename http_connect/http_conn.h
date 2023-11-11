@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <stdarg.h>
 #include "../timer/listTimer.h"
+#include "../log/log.h"
 
 class util_timer;
 
