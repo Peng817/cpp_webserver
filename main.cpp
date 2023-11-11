@@ -380,5 +380,6 @@ int main(int argc, char *argv[])
     delete timerList;
     delete pool;
     LOG_INFO("--服务器安全关闭");
+    // printf("1\n");
     return 0;
 }

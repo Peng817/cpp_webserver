@@ -185,14 +185,14 @@ inline bool block_queue<T>::pop(T &item)
     m_mutex.lock();
     while (m_size <= 0)
     {
-        // 一般情形下，如果没有元素可以Pop,将会阻塞，直到被唤醒跳出循环
-        // 如果wait失败，这说明wait行为本身出现了问题，比较罕见，此时pop结束，并返回false
-        if (!m_cond.wait(m_mutex.get_mutex()))
+        if (m_is_close)
         {
             m_mutex.unlock();
             return false;
         }
-        if (m_is_close)
+        // 一般情形下，如果没有元素可以Pop,将会阻塞，直到被唤醒跳出循环
+        // 如果wait失败，这说明wait行为本身出现了问题，比较罕见，此时pop结束，并返回false
+        if (!m_cond.wait(m_mutex.get_mutex()))
         {
             m_mutex.unlock();
             return false;
@@ -215,7 +215,6 @@ inline void block_queue<T>::flush()
 template <class T>
 inline void block_queue<T>::close()
 {
-    clear();
     m_mutex.lock();
     m_is_close = true;
     m_mutex.unlock();

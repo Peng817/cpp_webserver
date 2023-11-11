@@ -206,8 +206,10 @@ bool http_conn::read()
             m_read_idx += bytesRead;
         }
     }
+    char ip[16] = {0};
+    inet_ntop(AF_INET, &m_address.sin_addr.s_addr, ip, INET_ADDRSTRLEN);
     std::cout << "--接收到请求报文...\n";
-    LOG_INFO("--接收到请求报文如下:\n%s", m_read_buf);
+    LOG_INFO("--从%s:%d接收到请求报文如下:\n%s", ip, m_address.sin_port, m_read_buf);
     return true;
 }
 
@@ -272,7 +274,9 @@ bool http_conn::write()
             // 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否立即关闭连接
             unmap();
             std::cout << "--已经发出" << m_bytes_have_send << " bytes 数据。\n";
-            LOG_INFO("--已经发出%d bytes数据", m_bytes_have_send);
+            char ip[16] = {0};
+            inet_ntop(AF_INET, &m_address.sin_addr.s_addr, ip, INET_ADDRSTRLEN);
+            LOG_INFO("--已向%s:%d发出%d bytes数据", ip, m_address.sin_port, m_bytes_have_send);
             LOG_INFO("--发送响应报文头如下:\n%s", m_write_buf);
             modfd(m_epollfd, m_sockfd, EPOLLIN);
             if (m_linger)

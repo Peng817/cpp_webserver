@@ -340,18 +340,17 @@ log::~log()
 {
     if (m_async_thread != 0)
     {
+        m_mutex.lock();
         while (m_log_queue && !m_log_queue->empty())
         {
             // 使得任务队列中的任务全部完成
             m_log_queue->flush();
         }
         // 关闭队列将使得异步线程执行的函数结束
-        m_mutex.lock();
         m_log_queue->close();
         m_mutex.unlock();
         pthread_join(m_async_thread, NULL);
         // printf("--日志异步线程已回收,tid=%ld\n", m_async_thread);
-        m_async_thread = 0;
     }
     // 如果阻塞队列指针非空，代表存在一个new出来的阻塞队列，需要及时释放
     if (!m_log_queue)
@@ -411,6 +410,6 @@ void log::async_write_log()
         m_mutex.lock();
         fputs(single_log.c_str(), m_fp);
         m_mutex.unlock();
-        // printf("--tid:%ld log async-thread finish 1 job.\n", pthread_self());
+        //  printf("--tid:%ld log async-thread finish 1 job.\n", pthread_self());
     }
 }
