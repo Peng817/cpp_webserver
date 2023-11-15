@@ -62,6 +62,43 @@ void modfd(int epollfd, int fd, int ev)
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
+/*
+    使用连接池中的一个连接去查询数据库中的注册信息表
+    如果当前连接池中的连接全部被占用而导致无法查询数据
+    ，则不会阻塞，直接返回false。
+*/
+bool get_registration_map(
+    connection_pool *mysql_conn_pool,
+    std::map<std::string, std::string> &regis_map)
+{
+    regis_map.clear();
+    MYSQL *mysql = NULL;
+    // 使用资源控制类从资源池中抓取一个资源
+    connection_pool_wrapper conn_pool_warpper((*mysql_conn_pool));
+    // 取出资源控制类抓取到的资源
+    mysql = conn_pool_warpper.get_raw_connection();
+    if (mysql == NULL)
+    {
+        // 说明当前连接池没有可用连接
+        return false;
+    }
+    // 查询和存储并不需要加锁来实现原子操作，因为连接池中每个连接都被独立占用
+    if (mysql_query(mysql, "SELECT username,password FROM user"))
+    {
+        LOG_ERROR("mysql:SELECT error:%s\n", mysql_error(mysql));
+    }
+    MYSQL_RES *res_mysql = mysql_store_result(mysql);
+    MYSQL_ROW row;
+    string tmp_username;
+    string tmp_password;
+    while (row = mysql_fetch_row(res_mysql))
+    {
+        tmp_username = row[0];
+        tmp_password = row[1];
+        regis_map[tmp_username] = tmp_password;
+    }
+}
+
 // 定义类的静态成员变量
 /*
 值得注意的是，如果将静态成员变量的值在头文件的类外进行定义，则会触发多重定义
@@ -74,6 +111,7 @@ void http_conn::process()
 {
     // 解析HTTP请求
     HTTP_CODE parseReturn = parseRequest();
+    LOG_DEBUG("--解析结果：%d [0:NOREQUEST,1:GETREQUEST]", parseReturn);
     if (parseReturn == NO_REQUEST)
     {
         /*
@@ -138,6 +176,12 @@ void http_conn::init(int sockfd, const sockaddr_in &addr, util_timer *timer)
     init(sockfd, addr);
 }
 
+void http_conn::init(int sockfd, const sockaddr_in &addr, util_timer *timer, connection_pool *db_connect_pool)
+{
+    m_db_connect_pool = db_connect_pool;
+    init(sockfd, addr, timer);
+}
+
 void http_conn::close_conn()
 {
     // 关闭连接应该做的事：将连接从epoll中移除，将连接描述符关闭,将成员变量悬置，将用户计数-1
@@ -151,8 +195,10 @@ void http_conn::close_conn()
         // 绑定的定时器会被timerList销毁，我们只需要提前断开绑定即可
         m_timer = NULL;
         m_user_count--;
-        printf("--http_conn class close connect,and pointer to timer in http_conn set to NULL.\n");
-        LOG_INFO("--http_conn class close connect,and pointer to timer in http_conn set to NULL.");
+        // 绑定的数据库连接池断开
+        m_db_connect_pool = NULL;
+        printf("--http_conn class close connect,and pointer to timer,db_connect_pool in http_conn set to NULL.\n");
+        LOG_INFO("--http_conn class close connect,and pointer to timer,db_connect_pool in http_conn set to NULL.");
         LOG_INFO("--delete 1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
         // 每次结束一个连接，则将日志文件指针维护的缓存强推到日志文件里，刷新缓存
         log::get_instance()->file_flush();
@@ -313,6 +359,8 @@ void http_conn::init()
     m_start_line = 0;
     m_bytes_to_send = 0;
     m_bytes_have_send = 0;
+    m_content_length = 0;
+    m_content = NULL;
     m_method = GET;
     m_url = NULL;
     m_version = NULL;
@@ -331,6 +379,7 @@ http_conn::HTTP_CODE http_conn::parseRequest()
     m_check_state = CHECK_STATE_REQUESTLINE;
     char *text = 0;
     HTTP_CODE ret;
+
     // 从状态机执行的更底层，而主状态机依赖从状态机返回的结果，我们使用一个循环来同时运行两台机器
     while (m_check_state != CHECK_STATE_EXIT && lineStatus == LINE_OK)
     {
@@ -371,15 +420,6 @@ http_conn::HTTP_CODE http_conn::parseRequest()
         }
         case CHECK_STATE_CONTENT:
         {
-            ret = parseContent(text);
-            if (ret == BAD_REQUEST)
-            {
-                return BAD_REQUEST;
-            }
-            else if (ret == GET_REQUEST)
-            {
-                m_check_state = CHECK_STATE_EXIT;
-            }
             /*
             对于请求体，其解析方式不再像请求头请求行一样逐行解析，而是从text开始后面
             的整体内容直接解析，这使得要么整体解析成功返回GETREQ,要么解析失败返回BAD
@@ -390,6 +430,16 @@ http_conn::HTTP_CODE http_conn::parseRequest()
             这使得调用该函数的process()函数将连接重新作为读就绪放入epoll，使得该连接
             维护的读缓存可以有机会继续读入新的内容。
             */
+            ret = parseContent(text);
+            if (ret == BAD_REQUEST)
+            {
+                return BAD_REQUEST;
+            }
+            else if (ret == GET_REQUEST)
+            {
+                m_check_state = CHECK_STATE_EXIT;
+                break;
+            }
             lineStatus = LINE_OPEN;
             break;
         }
@@ -509,6 +559,10 @@ http_conn::HTTP_CODE http_conn::parseRequestLine(char *text)
     {
         m_method = GET;
     }
+    else if (strcasecmp(method, "POST") == 0)
+    {
+        m_method = POST;
+    }
     else
     {
         return BAD_REQUEST;
@@ -602,6 +656,10 @@ http_conn::HTTP_CODE http_conn::parseContent(char *text)
     if (m_read_idx >= (m_content_length + m_checked_idx))
     {
         text[m_content_length] = '\0';
+        // 在POST请求中，表单将追加在请求主体中
+        // 因为请求报文已经全部放在内存缓存中，所以
+        // 只需要使用一个字符串指针指向报文主体的位置即可
+        m_content = text;
         return GET_REQUEST;
     }
     return NO_REQUEST;
@@ -609,6 +667,11 @@ http_conn::HTTP_CODE http_conn::parseContent(char *text)
 
 http_conn::LINE_STATUS http_conn::parseLine()
 {
+    // 如果状态为检测请求体，则该函数不适用，直接返回OK,交给parse_content函数处理
+    if (m_check_state == CHECK_STATE_CONTENT)
+    {
+        return LINE_OK;
+    }
     char temp;
     /* 循环很可能并不会走到m_read_idx，因为只会检查一行*/
     for (; m_checked_idx < m_read_idx; m_checked_idx++)
@@ -669,7 +732,184 @@ http_conn::HTTP_CODE http_conn::doRequest()
 {
     strcpy(m_real_file, doc_root);
     int len = strlen(doc_root);
-    strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    if (m_method == GET)
+    {
+        strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    }
+    else if (m_method == POST)
+    {
+        // 如果是POST，则需要分析url，因为POST携带的信息接在url尾部
+        const char *op = strrchr(m_url, '/') + 1;
+        LOG_DEBUG("--请求POST报文的操作字符为: %s", op);
+        switch (*op)
+        {
+        case '0':
+        {
+            // '0'代表跳转到注册页面
+            string next_url = "/register.html";
+            strncpy(m_real_file + len, next_url.c_str(),
+                    FILENAME_LEN - len - 1);
+        }
+        break;
+        case '1':
+        {
+            // '1'代表跳转到登录页面
+            string next_url = "/log.html";
+            strncpy(m_real_file + len, next_url.c_str(),
+                    FILENAME_LEN - len - 1);
+        }
+        break;
+        case '2':
+        {
+            // '2'代表登录检测
+            char usr_name[32], pwd[32];
+            /*
+                登录检测发送的POST请求中的请求体的内容格式固定如下：
+                user=xxxx&password=****
+                因此对该请求体做提取
+            */
+            int check_idx = 5; // 从5开始，跳过user=
+            int copy_idx = 0;
+            while (m_content[check_idx] != '&')
+            {
+                usr_name[copy_idx++] = m_content[check_idx++];
+            }
+            usr_name[copy_idx] = '\0';
+            check_idx += 10; // 再跳10个字符，跳过&password=
+            copy_idx = 0;
+            while (m_content[check_idx] != '\0')
+            {
+                pwd[copy_idx++] = m_content[check_idx++];
+            }
+            pwd[copy_idx] = '\0';
+
+            // 获取数据库连接，并利用连接查询post输入的用户名
+            connection_pool_wrapper safe_connect(*m_db_connect_pool);
+            MYSQL *conn = safe_connect.get_raw_connection();
+            if (conn != NULL)
+            {
+                char queryBuf[256];
+                snprintf(queryBuf, sizeof(queryBuf) - 1,
+                         "SELECT * from user where username = '%s' AND password = '%s'",
+                         usr_name, pwd);
+                if (mysql_query(conn, queryBuf))
+                {
+                    LOG_INFO("--用户： %s,登录失败，失败原因:mysql查询失败", usr_name);
+                    // mysqL查询失败，跳转到错误页面
+                    strncpy(m_real_file + len, "/logError.html",
+                            FILENAME_LEN - len - 1);
+                    break;
+                }
+                MYSQL_RES *result = mysql_store_result(conn);
+                if (mysql_fetch_row(result))
+                {
+                    LOG_INFO("--用户：%s ,登录成功", usr_name);
+                    // 查询成功，则证明用户名登录成功
+                    strncpy(m_real_file + len, "/welcome.html",
+                            FILENAME_LEN - len - 1);
+                    break;
+                }
+                else
+                {
+                    LOG_INFO("--用户： %s,登录失败，失败原因:密码不匹配", usr_name);
+                    // 查询结果为空，则证明用户名和密码不匹配
+                    strncpy(m_real_file + len, "/logError.html",
+                            FILENAME_LEN - len - 1);
+                    break;
+                }
+            }
+            else
+            {
+                // 如果当前数据库连接池中没有连接，则服务器忙
+                // 跳转到登录错误
+                string next_url = "/logError.html";
+                strncpy(m_real_file + len, next_url.c_str(),
+                        FILENAME_LEN - len - 1);
+                LOG_INFO("--用户： %s,登录失败，失败原因:当前数据库连接池中连接用完", usr_name);
+            }
+        }
+        break;
+        case '3':
+        {
+            char usr_name[32], pwd[32];
+            /*
+                注册检测发送的POST请求中的请求体的内容格式固定如下：
+                user=xxxx&password=****
+                因此以该形式对该请求体做提取
+            */
+            int check_idx = 5; // 从5开始，跳过user=
+            int copy_idx = 0;
+            while (m_content[check_idx] != '&')
+            {
+                usr_name[copy_idx++] = m_content[check_idx++];
+            }
+            usr_name[copy_idx] = '\0';
+            check_idx += 10; // 再跳10个字符，跳过&password=
+            copy_idx = 0;
+            while (m_content[check_idx] != '\0')
+            {
+                pwd[copy_idx++] = m_content[check_idx++];
+            }
+            pwd[copy_idx] = '\0';
+            // 获取数据库连接，并利用连接查询post输入的用户名
+            connection_pool_wrapper safe_connect(*m_db_connect_pool);
+            MYSQL *conn = safe_connect.get_raw_connection();
+            if (conn != NULL)
+            {
+                char query_cmd[256];
+                snprintf(query_cmd, sizeof(query_cmd) - 1,
+                         "SELECT * from user where username = '%s'",
+                         usr_name);
+                mysql_query(conn, query_cmd);
+                MYSQL_RES *result = mysql_store_result(conn);
+                if (mysql_fetch_row(result))
+                {
+                    // 说明已有同名用户名存在
+                    strncpy(m_real_file + len, "/registerError.html",
+                            FILENAME_LEN - len - 1);
+                    LOG_INFO("--用户： %s,注册失败，失败原因:注册用户名已存在", usr_name);
+                    break;
+                }
+                else
+                {
+                    // 说明没有同名用户，则可以增加数据
+                    snprintf(query_cmd, sizeof(query_cmd) - 1,
+                             "INSERT INTO user(username,password) VALUES('%s','%s')",
+                             usr_name, pwd);
+                    if (mysql_query(conn, query_cmd) == 0)
+                    {
+                        // 注册成功
+                        strncpy(m_real_file + len, "/log.html",
+                                FILENAME_LEN - len - 1);
+                        LOG_INFO("--用户： %s,注册成功！", usr_name);
+                        break;
+                    }
+                    else
+                    {
+                        // 注册失败
+                        strncpy(m_real_file + len, "/registerError.html",
+                                FILENAME_LEN - len - 1);
+                        LOG_INFO("--用户： %s,注册失败，失败原因:mysql增加数据失败", usr_name);
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // 如果当前数据库连接池中没有连接，则服务器忙
+                // 跳转到注册错误
+                string next_url = "/registerError.html";
+                strncpy(m_real_file + len, next_url.c_str(),
+                        FILENAME_LEN - len - 1);
+                LOG_INFO("--用户： %s,注册失败，失败原因:当前数据库连接池中连接用完", usr_name);
+            }
+        }
+        break;
+        default:
+            break;
+        }
+    }
+
     /* unix系统函数调用 */
     // 获取m_real_file文件的相关的状态信息，-1失败，0成功
     if (stat(m_real_file, &m_file_stat) < 0)
@@ -698,6 +938,7 @@ http_conn::HTTP_CODE http_conn::doRequest()
     */
     m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
+
     return FILE_REQUEST;
 }
 

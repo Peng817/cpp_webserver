@@ -15,12 +15,19 @@
 #include "thread_pool/threadPool.hpp"
 #include "http_connect/http_conn.h"
 #include "log/log.h"
+#include "mysql_conn_pool/mysql_conn_pool.h"
 
 const int MAX_FD = 65535;            // 最大文件描述符个数
 const int MAX_EVENT_NUMBER = 100000; // 最大事件个数
-const int TIME_SLOT = 5;             // alarm信号频率
+const int TIME_SLOT = 60;            // alarm信号频率
 const int LOG_MODE = log::ASYNC;     // 写日志的模式
 static int pipefd[2];
+const char *MY_MYSQL_URL = "localhost";
+const char *MY_MYSQL_USERNAME = "root";
+const char *MY_MYSQL_PASSWORD = "Tt123456";
+const char *MY_MYSQL_DBNAME = "webserver";
+const int MY_MYSQL_PORT = 3306;
+const int MY_DBPOOL_MAX_SIZE = 8;
 
 /*
 感觉不用extern应该也行，此处使用extern是为了强调以下函数是声明，但不加其实系统也不会认定为定义
@@ -128,10 +135,12 @@ int main(int argc, char *argv[])
 
     */
     addsig(SIGPIPE, SIG_IGN);
+    // 创建数据库连接池,并初始化
+    connection_pool *db_connect_pool = new connection_pool;
+    db_connect_pool->init(MY_DBPOOL_MAX_SIZE, MY_MYSQL_URL, MY_MYSQL_PORT,
+                          MY_MYSQL_USERNAME, MY_MYSQL_PASSWORD, MY_MYSQL_DBNAME);
     // 创建线程池，并初始化线程池
     threadPool<http_conn> *pool = NULL;
-    // 创建定时器有序链表
-    sort_timer_lst *timerList = new sort_timer_lst();
     try
     {
         pool = new threadPool<http_conn>;
@@ -143,6 +152,8 @@ int main(int argc, char *argv[])
     // 创建一个客户连接数组用于保存所有的客户端信息
     // TODO：感觉可以改进，一开始就创建了65536个连接对象，每个对象都维护各自的读写缓存，感觉太浪费
     http_conn *users = new http_conn[MAX_FD];
+    // 创建定时器有序链表
+    sort_timer_lst *timerList = new sort_timer_lst();
     assert(users);
     // 创建TCP套接字
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
@@ -255,9 +266,10 @@ int main(int argc, char *argv[])
                 time_t cur = time(NULL);
                 timer->expire = cur + 3 * TIME_SLOT;
                 printf("--build 1 timer...\n");
-                users[cfd].init(cfd, clientAddress, timer);
+                users[cfd].init(cfd, clientAddress, timer, db_connect_pool);
                 timerList->add_timer(timer);
-                LOG_INFO("--build 1 timer,1 http_conn,now %d http-connect is linking!", http_conn::m_user_count);
+                LOG_INFO("--build 1 timer,1 http_conn,http_conn load db_connect_pool ,now %d http-connect is linking!",
+                         http_conn::m_user_count);
             }
             else if ((sockfd == pipefd[0]) && (epollEvents[i].events & EPOLLIN))
             {

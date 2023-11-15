@@ -1,6 +1,7 @@
 #ifndef HTTPCONN_H
 #define HTTPCONN_H
 #include <iostream>
+#include <map>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include <stdarg.h>
 #include "../timer/listTimer.h"
 #include "../log/log.h"
+#include "../mysql_conn_pool/mysql_conn_pool.h"
 
 class util_timer;
 
@@ -104,6 +106,8 @@ public:
     void init(int sockfd, const struct sockaddr_in &addr);
     // 通过传入socket描述符和客户端地址以及定时器来初始化连接
     void init(int sockfd, const struct sockaddr_in &addr, util_timer *timer);
+    // 通过传入socket描述符和客户端地址，定时器以及连接池来初始化连接
+    void init(int sockfd, const struct sockaddr_in &addr, util_timer *timer, connection_pool *db_connect_pool);
     // 关闭连接
     void close_conn();
     // 非阻塞读，由主线程以proactor模式调用
@@ -177,6 +181,8 @@ private:
     bool m_linger;
     // 解析结果：请求体的长度
     int m_content_length;
+    // 解析结果：请求体的字符串指针
+    char *m_content;
     /*
     报文解析状态变量会被解析函数内的几个子解析函数改变。为了让变量能跨函数
     的作用，此时将该状态变量作为成员变量来实现在类内空间域的全局性
@@ -201,6 +207,9 @@ private:
     int m_bytes_have_send;
     // 记录分散写已经写的数据量
     int m_bytes_to_send;
+
+    // 绑定的数据库连接池指针
+    connection_pool *m_db_connect_pool;
 
 public:
     /* 静态成员变量必须在类外定义，因此放在了类的实现文件中定义 */
