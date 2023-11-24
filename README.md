@@ -18,7 +18,7 @@ c++多线程服务器练习项目
   USE yourdb;
   CREATE TABLE user(
       username char(50) NULL,
-      passwd char(50) NULL
+      password char(50) NULL
   )ENGINE=InnoDB;
   
   // 添加数据
