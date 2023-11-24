@@ -12,13 +12,15 @@ class connection_pool
 {
 public:
     connection_pool(){};
-    //~connection_pool();
+    ~connection_pool();
     void init(unsigned int max_size, string url, int port,
               string user, string pwd, string database_name);
     // 从数据库连接池中请求一个可用连接
     MYSQL *get_connection();
     // 释放一个可用连接，归还到池中
     bool release_connection(MYSQL *conn);
+    // 与init相对，销毁数据库连接池
+    void destroy();
 
 private:
     locker m_lock;                  // 保护连接池的互斥访问量

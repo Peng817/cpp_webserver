@@ -1,5 +1,10 @@
 #include "mysql_conn_pool.h"
 
+connection_pool::~connection_pool()
+{
+    destroy();
+}
+
 void connection_pool::init(unsigned int max_size, string url, int port, string user, string pwd, string database_name)
 {
     m_url = url;
@@ -69,6 +74,20 @@ bool connection_pool::release_connection(MYSQL *conn)
     m_lock.unlock();
     m_resourse.post();
     return true;
+}
+
+void connection_pool::destroy()
+{
+    m_lock.lock();
+    if (m_conn_pool.size() > 0)
+    {
+        for (auto it : m_conn_pool)
+        {
+            mysql_close(it);
+        }
+        m_conn_pool.clear();
+    }
+    m_lock.unlock();
 }
 
 connection_pool_wrapper::connection_pool_wrapper(connection_pool &pool)
