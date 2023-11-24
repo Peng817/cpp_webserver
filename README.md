@@ -8,7 +8,7 @@ c++多线程服务器练习项目
   - Centos7
   - MySQL版本5.7.29
 
-- 测试前确认主机已安装Mysql数据库
+- 测试前确认主机已安装Mysql数据库,及mysql-devel
 
   ```
   // 建立yourdb库
